@@ -1,0 +1,13 @@
+# Python Environment
+__pycache__/
+*.pyc
+.venv/
+.env
+
+# Local Database & Output Data
+*.db
+*.csv
+*.parquet
+
+# Credentials & Secrets
+google_credentials.json
