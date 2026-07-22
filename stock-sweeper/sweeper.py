@@ -1,43 +1,55 @@
+import sqlite3
+import time
 import yfinance as yf
 import pandas as pd
 from datetime import datetime
+from config import DB_NAME, BATCH_SIZE, BATCH_PAUSE_SECONDS
+from sec_tickers import fetch_sec_tickers
 
 def extract_ticker_data(ticker_symbol: str) -> tuple[dict, list[dict]]:
     """
-    Extracts metadata, historical financial statements (4-5 years),
-    and forward analyst estimates for a single ticker via yfinance.
-    
-    Returns:
-        overview_data (dict): Single record for company_overview table.
-        financial_records (list[dict]): Multi-year rows for financial_records table.
+    Extracts summary screening metrics and multi-year financial statements
+    for a single ticker via yfinance.
     """
     try:
         yt = yf.Ticker(ticker_symbol)
         info = yt.info
         
-        # Guard clause: Ensure yfinance actually returned valid data for this ticker
         current_price = info.get('currentPrice') or info.get('regularMarketPrice')
-        if not current_price:
+        market_cap = info.get('marketCap')
+        
+        # Guard clause: Require valid price and market cap to process
+        if not current_price or not market_cap:
             return None, []
             
-        # 1. Company Overview Record
+        # Debt to Equity in yfinance is a percentage (e.g., 150 = 1.5 ratio)
+        raw_dte = info.get('debtToEquity')
+        dte_ratio = (float(raw_dte) / 100.0) if raw_dte is not None else None
+            
+        # 1. Company Overview Record (Direct summary metrics for screening)
         overview_data = {
             'ticker': ticker_symbol,
             'company_name': info.get('longName') or info.get('shortName') or ticker_symbol,
             'sector': info.get('sector', 'Unknown'),
             'industry': info.get('industry', 'Unknown'),
+            'market_cap': float(market_cap),
+            'current_price': float(current_price),
             'beta': info.get('beta'),
-            'current_price': current_price,
+            'current_ratio': info.get('currentRatio'),
+            'debt_to_equity': dte_ratio,
+            'operating_margins': info.get('operatingMargins'),
+            'earnings_growth': info.get('earningsGrowth'),
+            'revenue_growth': info.get('revenueGrowth'),
+            'forward_pe': info.get('forwardPE'),
             'is_active': 1,
             'last_scraped': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         }
         
         financial_records = []
+        inc_stmt = yt.financials
+        bal_sheet = yt.balance_sheet
         
-        # 2. Extract Historical Statements (Income Statement & Balance Sheet)
-        inc_stmt = yt.financials  # Yearly income statement (Columns = Dates)
-        bal_sheet = yt.balance_sheet  # Yearly balance sheet
-        
+        # 2. Extract Historical Statements
         if isinstance(inc_stmt, pd.DataFrame) and not inc_stmt.empty:
             for date_col in inc_stmt.columns:
                 try:
@@ -50,13 +62,11 @@ def extract_ticker_data(ticker_symbol: str) -> tuple[dict, list[dict]]:
                 eps = inc_stmt.loc['Diluted EPS', date_col] if 'Diluted EPS' in inc_stmt.index else None
                 shares = inc_stmt.loc['Diluted Average Shares', date_col] if 'Diluted Average Shares' in inc_stmt.index else None
                 
-                # Balance Sheet items
                 tot_assets = bal_sheet.loc['Total Assets', date_col] if isinstance(bal_sheet, pd.DataFrame) and 'Total Assets' in bal_sheet.index else None
                 tot_liab = bal_sheet.loc['Total Liabilities Net Minority Interest', date_col] if isinstance(bal_sheet, pd.DataFrame) and 'Total Liabilities Net Minority Interest' in bal_sheet.index else None
                 curr_assets = bal_sheet.loc['Current Assets', date_col] if isinstance(bal_sheet, pd.DataFrame) and 'Current Assets' in bal_sheet.index else None
                 curr_liab = bal_sheet.loc['Current Liabilities', date_col] if isinstance(bal_sheet, pd.DataFrame) and 'Current Liabilities' in bal_sheet.index else None
                 
-                # Derived Math
                 net_margin = (float(net_inc) / float(rev)) if (net_inc and rev and float(rev) != 0) else None
                 pe = (current_price / float(eps)) if (eps and float(eps) > 0) else None
                 
@@ -76,14 +86,13 @@ def extract_ticker_data(ticker_symbol: str) -> tuple[dict, list[dict]]:
                     'pe_ratio': pe
                 })
                 
-        # 3. Extract Forward Projections (1 to 2 Years)
+        # 3. Extract Forward Projections
         try:
             earnings_est = yt.earnings_estimate
             revenue_est = yt.revenue_estimate
             
             if isinstance(earnings_est, pd.DataFrame) and not earnings_est.empty:
                 for idx, row in earnings_est.iterrows():
-                    # idx values in yfinance earnings_estimate: '0y' (Current Year), '+1y' (Next Year)
                     if idx in ['0y', '+1y']:
                         proj_year = datetime.now().year if idx == '0y' else datetime.now().year + 1
                         proj_eps = row.get('avg')
@@ -110,23 +119,92 @@ def extract_ticker_data(ticker_symbol: str) -> tuple[dict, list[dict]]:
                             'pe_ratio': proj_pe
                         })
         except Exception:
-            pass  # Some smaller stocks do not have analyst projection tables
+            pass
             
         return overview_data, financial_records
 
     except Exception as e:
-        print(f"Error extracting data for {ticker_symbol}: {e}")
         return None, []
 
-if __name__ == "__main__":
-    # Test extraction on Apple (AAPL)
-    test_ticker = "AAPL"
-    print(f"Testing extraction for {test_ticker}...")
-    overview, records = extract_ticker_data(test_ticker)
+
+def save_to_database(conn, overview_batch, financial_batch):
+    """Saves a batch of extracted ticker records to SQLite."""
+    cursor = conn.cursor()
     
-    if overview:
-        print("\n--- Overview Record ---")
-        print(overview)
-        print(f"\n--- Financial Records ({len(records)} years total) ---")
-        for r in records:
-            print(f"Year: {r['year']} ({r['period_type']}) | Rev: {r['revenue']} | EPS: {r['eps_diluted']} | P/E: {r['pe_ratio']}")
+    cursor.executemany("""
+    INSERT OR REPLACE INTO company_overview 
+    (ticker, company_name, sector, industry, market_cap, current_price, beta, 
+     current_ratio, debt_to_equity, operating_margins, earnings_growth, 
+     revenue_growth, forward_pe, is_active, last_scraped)
+    VALUES (:ticker, :company_name, :sector, :industry, :market_cap, :current_price, :beta,
+            :current_ratio, :debt_to_equity, :operating_margins, :earnings_growth,
+            :revenue_growth, :forward_pe, :is_active, :last_scraped)
+    """, overview_batch)
+    
+    cursor.executemany("""
+    INSERT OR REPLACE INTO financial_records
+    (ticker, year, period_type, revenue, net_income, net_income_margin, eps_diluted, 
+     shares_outstanding, total_assets, total_liabilities, current_assets, current_liabilities, pe_ratio)
+    VALUES (:ticker, :year, :period_type, :revenue, :net_income, :net_income_margin, :eps_diluted,
+            :shares_outstanding, :total_assets, :total_liabilities, :current_assets, :current_liabilities, :pe_ratio)
+    """, financial_batch)
+    
+    conn.commit()
+
+
+def run_sweeper(limit: int = None):
+    """
+    Main batch engine:
+    1. Fetches SEC directory.
+    2. Filters out already scraped tickers (cached today).
+    3. Sweeps yfinance in rate-limited batches.
+    4. Updates database.
+    """
+    conn = sqlite3.connect(DB_NAME)
+    
+    sec_tickers = fetch_sec_tickers()
+    if not sec_tickers:
+        print("Aborting sweep: Could not fetch SEC tickers.")
+        conn.close()
+        return
+
+    if limit:
+        sec_tickers = sec_tickers[:limit]
+
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    cursor = conn.cursor()
+    cursor.execute("SELECT ticker FROM company_overview WHERE DATE(last_scraped) = ?", (today_str,))
+    scraped_today = {row[0] for row in cursor.fetchall()}
+    
+    pending_tickers = [t for t in sec_tickers if t not in scraped_today]
+    print(f"Total Tickers: {len(sec_tickers)} | Scraped Today: {len(scraped_today)} | Pending: {len(pending_tickers)}")
+
+    if not pending_tickers:
+        print("Market data is already up to date for today!")
+        conn.close()
+        return
+
+    overview_batch = []
+    financial_batch = []
+    
+    for i, ticker in enumerate(pending_tickers, 1):
+        overview, records = extract_ticker_data(ticker)
+        
+        if overview:
+            overview_batch.append(overview)
+            financial_batch.extend(records)
+            
+        if len(overview_batch) >= BATCH_SIZE or i == len(pending_tickers):
+            save_to_database(conn, overview_batch, financial_batch)
+            print(f"[{i}/{len(pending_tickers)}] Saved batch of {len(overview_batch)} tickers to database.")
+            overview_batch.clear()
+            financial_batch.clear()
+            time.sleep(BATCH_PAUSE_SECONDS)
+
+    conn.close()
+    print("Market sweep completed successfully.")
+
+if __name__ == "__main__":
+    # Test sweep on 50 tickers to populate our test sandbox
+    print("Running test sweep on 50 tickers...")
+    run_sweeper(limit=50)

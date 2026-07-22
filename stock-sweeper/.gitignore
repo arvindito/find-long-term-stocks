@@ -11,3 +11,4 @@ __pycache__/
 
 # Credentials & Secrets
 google_credentials.json
+credentials.json
