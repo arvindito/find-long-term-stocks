@@ -1,13 +1,36 @@
 import sqlite3
 import time
+import requests
+import re
 import pandas as pd
 import yfinance as yf
+from bs4 import BeautifulSoup
 from datetime import datetime
 from config import DB_NAME
 from screener import run_screener
 from edgar import set_identity, Company
 
 set_identity("Arvind Advani arvind.advani@gmail.com")
+
+def fetch_finviz_eps_next_5y(ticker: str):
+    """
+    Scrapes 'EPS next 5Y' growth rate string from Finviz.
+    """
+    url = f"https://finviz.com/quote.ashx?t={ticker}"
+    headers = {'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)'}
+    try:
+        resp = requests.get(url, headers=headers, timeout=5)
+        if resp.status_code == 200:
+            soup = BeautifulSoup(resp.text, 'html.parser')
+            label_cell = soup.find(text=re.compile(r'EPS next 5Y', re.I))
+            if label_cell:
+                val_cell = label_cell.find_parent('td').find_next_sibling('td')
+                if val_cell:
+                    raw_val = val_cell.text.strip().replace('%', '')
+                    return float(raw_val) / 100.0
+    except Exception:
+        pass
+    return None
 
 def fetch_historical_year_end_prices(ticker: str, start_year: int, end_year: int):
     price_map = {}
@@ -123,7 +146,6 @@ def fetch_yahoo_current_and_consensus(ticker: str, current_year: int, price_map:
             eps_est = yt.earnings_estimate
             shares = info.get('sharesOutstanding')
 
-            # 1. 2026 Historical (Realized YTD/TTM)
             ttm_rev = info.get('totalRevenue')
             ttm_eps = info.get('trailingEps')
             ttm_netinc = (ttm_eps * shares) if (ttm_eps and shares) else None
@@ -132,7 +154,6 @@ def fetch_yahoo_current_and_consensus(ticker: str, current_year: int, price_map:
             curr_price = info.get('currentPrice') or info.get('regularMarketPrice')
             pe_2026 = (curr_price / ttm_eps) if (curr_price and ttm_eps and ttm_eps > 0) else None
 
-            # Fetch Balance Sheet values from yfinance
             tot_assets = info.get('totalAssets')
             tot_liab = None
             curr_assets = None
@@ -164,7 +185,6 @@ def fetch_yahoo_current_and_consensus(ticker: str, current_year: int, price_map:
                 'YahooFinance', datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             ))
 
-            # 2. 2026 Projected (0y Consensus)
             if rev_est is not None and '0y' in rev_est.index:
                 r_0y = float(rev_est.loc['0y', 'avg']) if pd.notnull(rev_est.loc['0y', 'avg']) else None
                 e_0y = float(eps_est.loc['0y', 'avg']) if (eps_est is not None and '0y' in eps_est.index and pd.notnull(eps_est.loc['0y', 'avg'])) else None
@@ -179,7 +199,6 @@ def fetch_yahoo_current_and_consensus(ticker: str, current_year: int, price_map:
                     'Yahoo_Consensus', datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                 ))
 
-            # 3. 2027 Projected (+1y Consensus)
             if rev_est is not None and '+1y' in rev_est.index:
                 r_1y = float(rev_est.loc['+1y', 'avg']) if pd.notnull(rev_est.loc['+1y', 'avg']) else None
                 e_1y = float(eps_est.loc['+1y', 'avg']) if (eps_est is not None and '+1y' in eps_est.index and pd.notnull(eps_est.loc['+1y', 'avg'])) else None
@@ -219,7 +238,6 @@ def enrich_shortlist_history(current_year: int = 2026):
 
         price_map = fetch_historical_year_end_prices(ticker, current_year - 10, current_year - 1)
 
-        # 1. SEC EDGAR Data for Years 5-10
         sec_records = fetch_sec_historical_years_5_to_10(ticker, current_year, price_map)
         if sec_records:
             records_tuple = [
@@ -250,16 +268,6 @@ def enrich_shortlist_history(current_year: int = 2026):
             conn.commit()
             print(f"    ✓ Sourced {len(sec_records)} deep historical years via SEC 10-K filings.")
 
-        # Update 2016-2025 Historical P/E ratios with historical close prices
-        for yr, p_close in price_map.items():
-            cursor.execute("""
-            UPDATE financial_records
-            SET pe_ratio = CASE WHEN eps_diluted > 0 THEN ? / eps_diluted ELSE NULL END
-            WHERE ticker = ? AND year = ? AND period_type = 'Historical';
-            """, (p_close, ticker, yr))
-        conn.commit()
-
-        # 2. 2026 YTD + Analyst Consensus
         yahoo_records = fetch_yahoo_current_and_consensus(ticker, current_year, price_map)
         if yahoo_records:
             cursor.executemany("""

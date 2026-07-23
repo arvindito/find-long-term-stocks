@@ -15,3 +15,6 @@ GOOGLE_CREDS_FILE = "google_credentials.json"
 # Sweeper batch settings
 BATCH_SIZE = 50
 BATCH_PAUSE_SECONDS = 1.5
+
+# API KEYs
+FINNHUB_API_KEY="d10422hr01qhkqr7oidgd10422hr01qhkqr7oie0"

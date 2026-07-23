@@ -1,12 +1,11 @@
 import sqlite3
 from config import DB_NAME
 
-def init_db():
-    """Initializes the SQLite database tables with our target screening parameters."""
+def create_tables():
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
-    
-    # Company Overview Table (Stores direct summary metrics for screening)
+
+    # Company Overview Table
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS company_overview (
         ticker TEXT PRIMARY KEY,
@@ -15,25 +14,24 @@ def init_db():
         industry TEXT,
         market_cap REAL,
         current_price REAL,
-        beta REAL,
-        current_ratio REAL,
-        debt_to_equity REAL,
-        operating_margins REAL,
+        forward_pe REAL,
         earnings_growth REAL,
         revenue_growth REAL,
-        forward_pe REAL,
-        is_active INTEGER DEFAULT 1,
-        last_scraped TIMESTAMP,
+        operating_margins REAL,
+        current_ratio REAL,
+        debt_to_equity REAL,
+        beta REAL,
+        source_provider TEXT DEFAULT 'YahooFinance',
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )
+    );
     """)
-    
-    # Financial Records Table (Stores multi-year statement data)
+
+    # Financial Records Table
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS financial_records (
         ticker TEXT,
         year INTEGER,
-        period_type TEXT,
+        period_type TEXT, -- 'Historical' or 'Projected'
         revenue REAL,
         net_income REAL,
         net_income_margin REAL,
@@ -44,13 +42,15 @@ def init_db():
         current_assets REAL,
         current_liabilities REAL,
         pe_ratio REAL,
+        source_provider TEXT DEFAULT 'YahooFinance',
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         PRIMARY KEY (ticker, year, period_type)
-    )
+    );
     """)
-    
+
     conn.commit()
     conn.close()
-    print(f"Database '{DB_NAME}' initialized with updated summary fields.")
+    print("Database tables initialized successfully with source attribution and timestamps!")
 
 if __name__ == "__main__":
-    init_db()
+    create_tables()
