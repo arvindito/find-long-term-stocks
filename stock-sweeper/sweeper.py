@@ -60,21 +60,46 @@ def _get_row_val(df: pd.DataFrame, row_names: list[str], col):
     return None
 
 
+def _inactive_overview(ticker_symbol: str) -> dict:
+    return {
+        'ticker': ticker_symbol,
+        'company_name': ticker_symbol,
+        'sector': 'Unknown',
+        'industry': 'Unknown',
+        'market_cap': None,
+        'current_price': None,
+        'beta': None,
+        'current_ratio': None,
+        'debt_to_equity': None,
+        'operating_margins': None,
+        'earnings_growth': None,
+        'revenue_growth': None,
+        'forward_pe': None,
+        'free_cash_flow': None,
+        'roic': None,
+        'is_active': 0,
+        'source_provider': 'YahooFinance',
+        'last_scraped': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+
+
 def extract_ticker_data(ticker_symbol: str, fetch_full_statements: bool = True) -> tuple[dict, list[dict]]:
     info = {}
     yt = None
-    for attempt in range(4):
+    for attempt in range(3):
         try:
             yt = yf.Ticker(ticker_symbol)
             info = yt.info or {}
-            if info and (info.get('currentPrice') or info.get('regularMarketPrice') or info.get('marketCap')):
-                break
+            # If yt.info completed without raising a 401/429 exception, do not retry 404/delisted symbols
+            break
         except Exception as e:
             err_str = str(e).lower()
+            if '404' in err_str or 'not found' in err_str:
+                return _inactive_overview(ticker_symbol), []
             if '401' in err_str or 'crumb' in err_str or '429' in err_str or 'rate' in err_str or 'too many' in err_str:
                 reset_yfinance_session()
                 time.sleep(1.5 * (attempt + 1))
-            elif attempt < 3:
+            elif attempt < 2:
                 time.sleep(0.5 * (2 ** attempt))
             else:
                 return None, []
@@ -84,6 +109,9 @@ def extract_ticker_data(ticker_symbol: str, fetch_full_statements: bool = True) 
         market_cap = _clean_float(info.get('marketCap'))
 
         if not current_price or not market_cap:
+            # If info returned valid metadata keys (or empty dict from 404 without exception), mark inactive
+            if info is not None:
+                return _inactive_overview(ticker_symbol), []
             return None, []
 
         raw_dte = _clean_float(info.get('debtToEquity'))
@@ -312,24 +340,59 @@ def save_to_database(conn, overview_batch, financial_batch):
     cursor = conn.cursor()
     if overview_batch:
         cursor.executemany("""
-        INSERT OR REPLACE INTO company_overview 
+        INSERT INTO company_overview 
         (ticker, company_name, sector, industry, market_cap, current_price, beta, 
          current_ratio, debt_to_equity, operating_margins, earnings_growth, 
          revenue_growth, forward_pe, free_cash_flow, roic, is_active, source_provider, last_scraped)
         VALUES (:ticker, :company_name, :sector, :industry, :market_cap, :current_price, :beta,
                 :current_ratio, :debt_to_equity, :operating_margins, :earnings_growth,
                 :revenue_growth, :forward_pe, :free_cash_flow, :roic, :is_active, :source_provider, :last_scraped)
+        ON CONFLICT(ticker) DO UPDATE SET
+            company_name = excluded.company_name,
+            sector = excluded.sector,
+            industry = excluded.industry,
+            market_cap = excluded.market_cap,
+            current_price = excluded.current_price,
+            beta = excluded.beta,
+            current_ratio = excluded.current_ratio,
+            debt_to_equity = excluded.debt_to_equity,
+            operating_margins = excluded.operating_margins,
+            earnings_growth = excluded.earnings_growth,
+            revenue_growth = excluded.revenue_growth,
+            forward_pe = excluded.forward_pe,
+            free_cash_flow = excluded.free_cash_flow,
+            roic = excluded.roic,
+            is_active = excluded.is_active,
+            source_provider = excluded.source_provider,
+            last_scraped = excluded.last_scraped,
+            updated_at = CURRENT_TIMESTAMP;
         """, overview_batch)
 
     if financial_batch:
         cursor.executemany("""
-        INSERT OR REPLACE INTO financial_records
+        INSERT INTO financial_records
         (ticker, year, period_type, revenue, net_income, net_income_margin, eps_diluted, 
          shares_outstanding, total_assets, total_liabilities, current_assets, current_liabilities, 
          operating_cash_flow, capital_expenditures, free_cash_flow, pe_ratio, source_provider, updated_at)
         VALUES (:ticker, :year, :period_type, :revenue, :net_income, :net_income_margin, :eps_diluted,
                 :shares_outstanding, :total_assets, :total_liabilities, :current_assets, :current_liabilities,
                 :operating_cash_flow, :capital_expenditures, :free_cash_flow, :pe_ratio, :source_provider, :updated_at)
+        ON CONFLICT(ticker, year, period_type) DO UPDATE SET
+            revenue = COALESCE(excluded.revenue, revenue),
+            net_income = COALESCE(excluded.net_income, net_income),
+            net_income_margin = COALESCE(excluded.net_income_margin, net_income_margin),
+            eps_diluted = COALESCE(excluded.eps_diluted, eps_diluted),
+            shares_outstanding = COALESCE(excluded.shares_outstanding, shares_outstanding),
+            total_assets = COALESCE(excluded.total_assets, total_assets),
+            total_liabilities = COALESCE(excluded.total_liabilities, total_liabilities),
+            current_assets = COALESCE(excluded.current_assets, current_assets),
+            current_liabilities = COALESCE(excluded.current_liabilities, current_liabilities),
+            operating_cash_flow = COALESCE(excluded.operating_cash_flow, operating_cash_flow),
+            capital_expenditures = COALESCE(excluded.capital_expenditures, capital_expenditures),
+            free_cash_flow = COALESCE(excluded.free_cash_flow, free_cash_flow),
+            pe_ratio = COALESCE(excluded.pe_ratio, pe_ratio),
+            source_provider = excluded.source_provider,
+            updated_at = excluded.updated_at;
         """, financial_batch)
     conn.commit()
 
@@ -348,20 +411,22 @@ def run_sweeper(limit: int = None, max_workers: int = 8):
         sec_tickers = sec_tickers[:limit]
 
     cursor = conn.cursor()
-    cursor.execute("SELECT MAX(ticker) FROM company_overview WHERE last_scraped >= datetime('now', '-24 hours')")
-    max_row = cursor.fetchone()
-    max_scraped_ticker = max_row[0] if max_row and max_row[0] else None
-
-    cursor.execute("SELECT ticker FROM company_overview WHERE last_scraped >= datetime('now', '-24 hours')")
+    # Tiered cache TTL:
+    # - Active mid/large-cap candidates (market_cap >= $300M): fresh for 24 hours
+    # - Inactive/delisted/404 tickers (is_active = 0) or deep micro-caps (< $300M): fresh for 30 days
+    cursor.execute("""
+        SELECT ticker FROM company_overview
+        WHERE last_scraped >= datetime('now', '-24 hours')
+           OR (
+               last_scraped >= datetime('now', '-30 days')
+               AND (is_active = 0 OR market_cap IS NULL OR market_cap < 300000000)
+           )
+    """)
     scraped_recent = {row[0] for row in cursor.fetchall()}
 
-    if max_scraped_ticker and max_scraped_ticker in sec_tickers:
-        resume_idx = sec_tickers.index(max_scraped_ticker) + 1
-        pending_tickers = [t for t in sec_tickers[resume_idx:] if t not in scraped_recent]
-    else:
-        pending_tickers = [t for t in sec_tickers if t not in scraped_recent]
+    pending_tickers = [t for t in sec_tickers if t not in scraped_recent]
 
-    print(f"Total Tickers: {len(sec_tickers)} | Scraped Recently: {len(scraped_recent)} (Last: {max_scraped_ticker}) | Pending: {len(pending_tickers)}")
+    print(f"Total Tickers: {len(sec_tickers)} | Scraped Recently: {len(scraped_recent)} | Pending: {len(pending_tickers)}")
 
     if not pending_tickers:
         conn.close()
@@ -373,32 +438,43 @@ def run_sweeper(limit: int = None, max_workers: int = 8):
     total_pending = len(pending_tickers)
     for start_idx in range(0, total_pending, BATCH_SIZE):
         batch_tickers = pending_tickers[start_idx:start_idx + BATCH_SIZE]
+        overview_map = {}
+        financial_batch = []
+        remaining = list(batch_tickers)
 
         for batch_attempt in range(3):
-            overview_batch, financial_batch = [], []
+            if not remaining:
+                break
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 future_to_ticker = {
                     executor.submit(extract_ticker_data, ticker, fetch_full): ticker
-                    for ticker in batch_tickers
+                    for ticker in remaining
                 }
                 for future in as_completed(future_to_ticker):
+                    t_sym = future_to_ticker[future]
                     try:
                         overview, records = future.result()
                         if overview:
-                            overview_batch.append(overview)
+                            overview_map[t_sym] = overview
                             financial_batch.extend(records)
                     except Exception:
                         pass
 
-            if len(overview_batch) > 0 or batch_attempt == 2:
+            active_in_batch = sum(1 for v in overview_map.values() if v.get('is_active') == 1)
+            # If fewer than 40% of the batch yielded active companies, a session/crumb expiration may have occurred mid-batch
+            if active_in_batch >= max(1, int(len(batch_tickers) * 0.4)) or batch_attempt == 2:
                 break
-            print(f"    [!] Batch yielded 0 companies (attempt {batch_attempt+1}/3). Refreshing Yahoo session & retrying...")
-            reset_yfinance_session(force=True)
-            time.sleep(5.0 * (batch_attempt + 1))
 
+            remaining = [t for t in batch_tickers if overview_map.get(t, {}).get('is_active') != 1]
+            print(f"    [!] Batch had only {active_in_batch}/{len(batch_tickers)} active companies (attempt {batch_attempt+1}/3). Refreshing Yahoo session & retrying {len(remaining)} tickers...")
+            reset_yfinance_session(force=True)
+            time.sleep(4.0 * (batch_attempt + 1))
+
+        overview_batch = list(overview_map.values())
+        active_count = sum(1 for v in overview_batch if v.get('is_active') == 1)
         save_to_database(conn, overview_batch, financial_batch)
         done_count = min(start_idx + BATCH_SIZE, total_pending)
-        print(f"[{done_count}/{total_pending}] Saved batch ({len(overview_batch)} valid companies, {len(financial_batch)} financial records) to DB.")
+        print(f"[{done_count}/{total_pending}] Saved batch ({active_count} active / {len(overview_batch)} total companies, {len(financial_batch)} financial records) to DB.")
         if done_count < total_pending:
             time.sleep(BATCH_PAUSE_SECONDS)
 

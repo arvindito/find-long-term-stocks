@@ -7,7 +7,7 @@ import yfinance as yf
 from datetime import datetime
 from config import DB_NAME
 from screener import run_screener
-from enricher import fetch_finviz_eps_next_5y
+from enricher import fetch_finviz_eps_next_5y, fetch_batch_historical_year_end_prices
 from utils import open_file
 
 EXPORT_DIR = "exports"
@@ -92,6 +92,9 @@ def calculate_robust_metric_unweighted(series, winsor_pct=0.10, num_stdev=1.0):
 
 
 def export_clean_dataset(max_history_years: int = 10):
+    from database import init_db
+    init_db(reset=False)
+
     print("Running SQL Screener...")
     shortlist_df = run_screener()
     if shortlist_df.empty:
@@ -112,42 +115,75 @@ def export_clean_dataset(max_history_years: int = 10):
     finviz_growth_cache = {}
     yahoo_lt_growth_cache = {}
 
+    # Load cached metadata from company_overview and financial_records first
+    ov_meta_df = pd.read_sql_query(
+        f"SELECT ticker, target_mean_price, finviz_eps_5y, yahoo_lt_growth, earnings_growth FROM company_overview WHERE ticker IN ({placeholders})",
+        conn,
+        params=filtered_tickers,
+    )
+    for _, r in ov_meta_df.iterrows():
+        t = r['ticker']
+        target_price_cache[t] = _clean_num(r.get('target_mean_price'))
+        finviz_growth_cache[t] = _clean_num(r.get('finviz_eps_5y'))
+        yahoo_lt_growth_cache[t] = _clean_num(r.get('yahoo_lt_growth')) or _clean_num(r.get('earnings_growth'))
+
+    fin_meta_df = pd.read_sql_query(
+        f"SELECT ticker, year, period_type, year_end_price, consensus_eps_growth, consensus_rev_growth FROM financial_records WHERE ticker IN ({placeholders}) AND year >= ?",
+        conn,
+        params=filtered_tickers + [min_historical_year],
+    )
+    for _, r in fin_meta_df.iterrows():
+        t = r['ticker']
+        yr = int(r['Year']) if 'Year' in r else int(r['year'])
+        pt = r['period_type']
+        yep = _clean_num(r.get('year_end_price'))
+        if pt == 'Historical' and yep is not None:
+            price_cache.setdefault(t, {})[yr] = yep
+        if pt == 'Projected':
+            eg = _clean_num(r.get('consensus_eps_growth'))
+            rg = _clean_num(r.get('consensus_rev_growth'))
+            if eg is not None or rg is not None:
+                growth_cache.setdefault(t, {})[yr] = {'eps_growth': eg, 'rev_growth': rg}
+
+    # Only batch-fetch historical prices for tickers missing cached year_end_price
+    tickers_missing_prices = [t for t in filtered_tickers if not price_cache.get(t)]
+    if tickers_missing_prices:
+        batch_prices = fetch_batch_historical_year_end_prices(tickers_missing_prices, min_historical_year, current_year - 1)
+        for t, p_map in batch_prices.items():
+            if p_map:
+                price_cache[t] = p_map
+
+    # Only query live Yahoo/Finviz for tickers missing cached target_mean_price or finviz_eps_5y
     for t in filtered_tickers:
         try:
-            data = yf.download(t, start=f"{min_historical_year}-01-01", end=f"{current_year}-01-15", progress=False)
-            if not data.empty:
-                close_data = data['Close'][t] if isinstance(data.columns, pd.MultiIndex) else data['Close']
-                close_data = close_data.dropna()
-                price_cache[t] = {}
-                for yr in range(min_historical_year, current_year):
-                    yr_data = close_data[close_data.index.year == yr]
-                    if not yr_data.empty:
-                        price_cache[t][yr] = _clean_num(yr_data.iloc[-1])
+            if finviz_growth_cache.get(t) is None:
+                finviz_growth_cache[t] = _clean_num(fetch_finviz_eps_next_5y(t))
+            if target_price_cache.get(t) is None or yahoo_lt_growth_cache.get(t) is None or not growth_cache.get(t):
+                yt = yf.Ticker(t)
+                info = yt.info or {}
+                if target_price_cache.get(t) is None:
+                    target_price_cache[t] = _clean_num(info.get('targetMeanPrice'))
+                if yahoo_lt_growth_cache.get(t) is None:
+                    raw_y_lt = _clean_num(info.get('longTermPotentialGrowth'))
+                    if raw_y_lt is None:
+                        raw_y_lt = _clean_num(info.get('earningsGrowth'))
+                    yahoo_lt_growth_cache[t] = raw_y_lt
 
-            yt = yf.Ticker(t)
-            info = yt.info or {}
-            target_price_cache[t] = _clean_num(info.get('targetMeanPrice'))
-            finviz_growth_cache[t] = _clean_num(fetch_finviz_eps_next_5y(t))
-            raw_y_lt = _clean_num(info.get('longTermPotentialGrowth'))
-            if raw_y_lt is None:
-                raw_y_lt = _clean_num(info.get('earningsGrowth'))
-            yahoo_lt_growth_cache[t] = raw_y_lt
-
-            rev_est = yt.revenue_estimate
-            eps_est = yt.earnings_estimate
-
-            growth_cache[t] = {}
-            if isinstance(rev_est, pd.DataFrame) and isinstance(eps_est, pd.DataFrame):
-                if '0y' in rev_est.index and '0y' in eps_est.index:
-                    growth_cache[t][current_year] = {
-                        'rev_growth': _clean_num(rev_est.loc['0y', 'growth']) if 'growth' in rev_est.columns else None,
-                        'eps_growth': _clean_num(eps_est.loc['0y', 'growth']) if 'growth' in eps_est.columns else None,
-                    }
-                if '+1y' in rev_est.index and '+1y' in eps_est.index:
-                    growth_cache[t][current_year + 1] = {
-                        'rev_growth': _clean_num(rev_est.loc['+1y', 'growth']) if 'growth' in rev_est.columns else None,
-                        'eps_growth': _clean_num(eps_est.loc['+1y', 'growth']) if 'growth' in eps_est.columns else None,
-                    }
+                if not growth_cache.get(t):
+                    rev_est = yt.revenue_estimate
+                    eps_est = yt.earnings_estimate
+                    growth_cache[t] = {}
+                    if isinstance(rev_est, pd.DataFrame) and isinstance(eps_est, pd.DataFrame):
+                        if '0y' in rev_est.index and '0y' in eps_est.index:
+                            growth_cache[t][current_year] = {
+                                'rev_growth': _clean_num(rev_est.loc['0y', 'growth']) if 'growth' in rev_est.columns else None,
+                                'eps_growth': _clean_num(eps_est.loc['0y', 'growth']) if 'growth' in eps_est.columns else None,
+                            }
+                        if '+1y' in rev_est.index and '+1y' in eps_est.index:
+                            growth_cache[t][current_year + 1] = {
+                                'rev_growth': _clean_num(rev_est.loc['+1y', 'growth']) if 'growth' in rev_est.columns else None,
+                                'eps_growth': _clean_num(eps_est.loc['+1y', 'growth']) if 'growth' in eps_est.columns else None,
+                            }
         except Exception:
             pass
 

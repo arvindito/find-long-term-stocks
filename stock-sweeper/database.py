@@ -40,12 +40,28 @@ def init_db(reset: bool = False):
         forward_pe REAL,
         free_cash_flow REAL,
         roic REAL,
+        target_mean_price REAL,
+        finviz_eps_5y REAL,
+        yahoo_lt_growth REAL,
+        last_enriched TIMESTAMP,
         is_active INTEGER DEFAULT 1,
         source_provider TEXT DEFAULT 'YahooFinance',
         last_scraped TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
     """)
+
+    # Non-destructive column migrations for company_overview
+    cursor.execute("PRAGMA table_info(company_overview);")
+    existing_overview_cols = {row[1] for row in cursor.fetchall()}
+    for col_name, col_type in [
+        ("target_mean_price", "REAL"),
+        ("finviz_eps_5y", "REAL"),
+        ("yahoo_lt_growth", "REAL"),
+        ("last_enriched", "TIMESTAMP"),
+    ]:
+        if col_name not in existing_overview_cols:
+            cursor.execute(f"ALTER TABLE company_overview ADD COLUMN {col_name} {col_type};")
 
     # Financial Records Table
     cursor.execute("""
@@ -66,11 +82,25 @@ def init_db(reset: bool = False):
         capital_expenditures REAL,
         free_cash_flow REAL,
         pe_ratio REAL,
+        year_end_price REAL,
+        consensus_eps_growth REAL,
+        consensus_rev_growth REAL,
         source_provider TEXT DEFAULT 'YahooFinance',
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         PRIMARY KEY (ticker, year, period_type)
     );
     """)
+
+    # Non-destructive column migrations for financial_records
+    cursor.execute("PRAGMA table_info(financial_records);")
+    existing_fin_cols = {row[1] for row in cursor.fetchall()}
+    for col_name, col_type in [
+        ("year_end_price", "REAL"),
+        ("consensus_eps_growth", "REAL"),
+        ("consensus_rev_growth", "REAL"),
+    ]:
+        if col_name not in existing_fin_cols:
+            cursor.execute(f"ALTER TABLE financial_records ADD COLUMN {col_name} {col_type};")
 
     conn.commit()
     conn.close()
