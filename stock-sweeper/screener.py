@@ -2,6 +2,7 @@ import sqlite3
 import pandas as pd
 from config import DB_NAME
 
+
 def run_screener(
     min_market_cap: float = 1_000_000_000,
     min_current_ratio: float = 0.5,
@@ -10,13 +11,14 @@ def run_screener(
     min_operating_margin: float = 0.10,
     min_earnings_growth: float = 0.05,
     min_revenue_growth: float = 0.05,
-    min_forward_pe: float = 5.0
+    min_forward_pe: float = 5.0,
+    min_roic: float = 0.10,
 ) -> pd.DataFrame:
     """
-    Queries local SQLite database applying the core 8 quality & growth filters.
+    Applies fundamental quality filters including Free Cash Flow and ROIC hurdles.
     """
     conn = sqlite3.connect(DB_NAME)
-    
+
     query = """
     SELECT 
         ticker,
@@ -31,7 +33,9 @@ def run_screener(
         operating_margins,
         current_ratio,
         debt_to_equity,
-        beta
+        beta,
+        free_cash_flow,
+        roic
     FROM company_overview
     WHERE is_active = 1
       AND market_cap >= ?
@@ -42,12 +46,14 @@ def run_screener(
       AND earnings_growth >= ?
       AND revenue_growth >= ?
       AND forward_pe >= ?
+      AND free_cash_flow > 0
+      AND roic >= ?
     ORDER BY forward_pe ASC;
     """
-    
+
     df = pd.read_sql_query(
-        query, 
-        conn, 
+        query,
+        conn,
         params=(
             min_market_cap,
             min_current_ratio,
@@ -56,28 +62,22 @@ def run_screener(
             min_operating_margin,
             min_earnings_growth,
             min_revenue_growth,
-            min_forward_pe
-        )
+            min_forward_pe,
+            min_roic,
+        ),
     )
     conn.close()
-    
+
     print(f"Screener complete: Found {len(df)} matching stocks.")
     return df
 
+
 if __name__ == "__main__":
-    print("Running screener with customized parameters...")
     shortlist = run_screener()
     if not shortlist.empty:
         print("\n--- Shortlisted Candidates ---")
-        print(shortlist.to_string(index=False))
-    else:
-        print("\nNo stocks matched all strict criteria in the current 30-ticker sample batch.")
-        print("To see top candidates in our current sample, let's inspect the active non-SPAC companies:")
-        
-        conn = sqlite3.connect(DB_NAME)
-        sample_df = pd.read_sql_query(
-            "SELECT ticker, company_name, market_cap, forward_pe, operating_margins FROM company_overview WHERE is_active=1 LIMIT 10", 
-            conn
+        print(
+            shortlist[
+                ['ticker', 'company_name', 'current_price', 'forward_pe', 'operating_margins', 'free_cash_flow', 'roic']
+            ].to_string(index=False)
         )
-        conn.close()
-        print(sample_df.to_string(index=False))

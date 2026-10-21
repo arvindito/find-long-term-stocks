@@ -1,9 +1,26 @@
+import argparse
 import sqlite3
 from config import DB_NAME
 
-def create_tables():
+
+def init_db(reset: bool = False):
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
+
+    if reset:
+        cursor.execute("DROP TABLE IF EXISTS company_overview;")
+        cursor.execute("DROP TABLE IF EXISTS financial_records;")
+
+    # Check if existing tables are missing newly required columns (FCF, ROIC, OCF, CapEx)
+    cursor.execute("PRAGMA table_info(company_overview);")
+    overview_cols = {row[1] for row in cursor.fetchall()}
+    if overview_cols and ("free_cash_flow" not in overview_cols or "roic" not in overview_cols or "last_scraped" not in overview_cols):
+        cursor.execute("DROP TABLE IF EXISTS company_overview;")
+
+    cursor.execute("PRAGMA table_info(financial_records);")
+    fin_cols = {row[1] for row in cursor.fetchall()}
+    if fin_cols and ("free_cash_flow" not in fin_cols or "operating_cash_flow" not in fin_cols or "capital_expenditures" not in fin_cols):
+        cursor.execute("DROP TABLE IF EXISTS financial_records;")
 
     # Company Overview Table
     cursor.execute("""
@@ -14,14 +31,18 @@ def create_tables():
         industry TEXT,
         market_cap REAL,
         current_price REAL,
-        forward_pe REAL,
-        earnings_growth REAL,
-        revenue_growth REAL,
-        operating_margins REAL,
+        beta REAL,
         current_ratio REAL,
         debt_to_equity REAL,
-        beta REAL,
+        operating_margins REAL,
+        earnings_growth REAL,
+        revenue_growth REAL,
+        forward_pe REAL,
+        free_cash_flow REAL,
+        roic REAL,
+        is_active INTEGER DEFAULT 1,
         source_provider TEXT DEFAULT 'YahooFinance',
+        last_scraped TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
     """)
@@ -31,7 +52,7 @@ def create_tables():
     CREATE TABLE IF NOT EXISTS financial_records (
         ticker TEXT,
         year INTEGER,
-        period_type TEXT, -- 'Historical' or 'Projected'
+        period_type TEXT,
         revenue REAL,
         net_income REAL,
         net_income_margin REAL,
@@ -41,6 +62,9 @@ def create_tables():
         total_liabilities REAL,
         current_assets REAL,
         current_liabilities REAL,
+        operating_cash_flow REAL,
+        capital_expenditures REAL,
+        free_cash_flow REAL,
         pe_ratio REAL,
         source_provider TEXT DEFAULT 'YahooFinance',
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -50,7 +74,11 @@ def create_tables():
 
     conn.commit()
     conn.close()
-    print("Database tables initialized successfully with source attribution and timestamps!")
+    print(f"Database '{DB_NAME}' initialized successfully.")
+
 
 if __name__ == "__main__":
-    create_tables()
+    parser = argparse.ArgumentParser(description="Initialize or reset the SQLite database.")
+    parser.add_argument("--reset", action="store_true", help="Drop and recreate all tables.")
+    args = parser.parse_args()
+    init_db(reset=args.reset)
