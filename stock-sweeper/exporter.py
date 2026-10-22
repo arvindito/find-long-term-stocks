@@ -116,6 +116,17 @@ def export_clean_dataset(max_history_years: int = 10):
     yahoo_lt_growth_cache = {}
 
     # Load cached metadata from company_overview and financial_records first
+    sector_pe_df = pd.read_sql_query(
+        "SELECT sector, forward_pe FROM company_overview WHERE is_active = 1 AND market_cap >= 1000000000 AND forward_pe >= 5.0 AND forward_pe <= 80.0",
+        conn,
+    )
+    sector_median_pe = {}
+    if not sector_pe_df.empty:
+        for sec_name, grp in sector_pe_df.groupby('sector'):
+            clean_pes = [float(x) for x in grp['forward_pe'] if _is_valid_num(x) and float(x) > 0]
+            if clean_pes:
+                sector_median_pe[sec_name] = float(np.median(clean_pes))
+
     ov_meta_df = pd.read_sql_query(
         f"SELECT ticker, target_mean_price, finviz_eps_5y, yahoo_lt_growth, earnings_growth FROM company_overview WHERE ticker IN ({placeholders})",
         conn,
@@ -281,14 +292,9 @@ def export_clean_dataset(max_history_years: int = 10):
         fwd_pe = _clean_num(sub_df['overview_forward_pe'].iloc[0], default=18.0)
         if fwd_pe <= 0:
             fwd_pe = 18.0
-        robust_pe = calculate_trend_weighted_metric(all_pe_ratios, all_years, current_year, alpha=0.20, winsor_pct=0.10) or round(fwd_pe, 2)
+        raw_robust_pe = calculate_trend_weighted_metric(all_pe_ratios, all_years, current_year, alpha=0.20, winsor_pct=0.10) or round(fwd_pe, 2)
 
-        # OPTION A: Multiple Compression Target (Company Historical Median P/E)
-        valid_hist_pes = hist_pe_ratios if hist_pe_ratios else [p for p in all_pe_ratios if _is_valid_num(p) and p > 0]
-        terminal_pe_target = float(np.median(valid_hist_pes)) if valid_hist_pes else 15.0
-        terminal_pe_target = max(10.0, min(terminal_pe_target, robust_pe))
-
-        # Dynamic Historical EPS CAGR (Method 1)
+        # DynamicHistorical EPS CAGR (Method 1)
         eps_cagr = 0.08
         valid_eps_hist = hist_rows[hist_rows['Diluted EPS ($)'].apply(lambda x: _is_valid_num(x) and float(x) > 0)]
         if len(valid_eps_hist) >= 2:
@@ -311,6 +317,27 @@ def export_clean_dataset(max_history_years: int = 10):
                 raw_rev_cagr = (new_rev / old_rev) ** (1.0 / n_rev_yrs) - 1.0
                 if _is_valid_num(raw_rev_cagr):
                     rev_cagr = float(np.clip(raw_rev_cagr, -0.35, 0.45))
+
+        raw_finviz_g = _clean_num(finviz_growth_cache.get(ticker))
+        finviz_g = float(np.clip(raw_finviz_g, -0.35, 0.45)) if raw_finviz_g is not None else eps_cagr
+
+        raw_yahoo_g = _clean_num(yahoo_lt_growth_cache.get(ticker))
+        yahoo_g = float(np.clip(raw_yahoo_g, -0.35, 0.45)) if raw_yahoo_g is not None else eps_cagr
+
+        # Dynamic Sector + PEG-Anchored P/E Ceiling & Turnaround Normalization
+        sec_name = str(sub_df['Sector'].iloc[0]) if not sub_df.empty else 'Unknown'
+        sec_pe = sector_median_pe.get(sec_name, 18.0)
+        expected_g = max(0.0, float(np.median([eps_cagr, rev_cagr, yahoo_g, finviz_g])))
+        # Growth-adjusted dynamic terminal ceiling: Sector Median P/E + PEG (1.0x) * Growth %, bounded by [sec_pe, 45.0]
+        peg_terminal_ceiling = min(45.0, max(sec_pe * 1.15, sec_pe + (expected_g * 100.0 * 0.85)))
+        # Dynamic starting P/E ceiling prevents near-zero EPS turnaround years (e.g. 500x trailing P/E) from distorting Year 1-4
+        starting_pe_ceiling = min(60.0, max(fwd_pe * 1.35, peg_terminal_ceiling * 1.25))
+        robust_pe = round(min(raw_robust_pe, starting_pe_ceiling), 2)
+
+        # OPTION A: Multiple Compression Target (Company Historical Median P/E bounded by Dynamic Ceiling)
+        valid_hist_pes = hist_pe_ratios if hist_pe_ratios else [p for p in all_pe_ratios if _is_valid_num(p) and p > 0]
+        raw_hist_median_pe = float(np.median(valid_hist_pes)) if valid_hist_pes else sec_pe
+        terminal_pe_target = max(10.0, min(raw_hist_median_pe, robust_pe, peg_terminal_ceiling))
 
         # Baseline EPS, Revenue, Shares for Projections
         base_eps = None
@@ -342,12 +369,6 @@ def export_clean_dataset(max_history_years: int = 10):
             mc = _clean_num(sub_df['overview_market_cap'].iloc[0])
             cp = _clean_num(sub_df['overview_current_price'].iloc[0])
             shares_m = round((mc / cp) / 1e6, 2) if (mc and cp and cp > 0) else 290.0
-
-        raw_finviz_g = _clean_num(finviz_growth_cache.get(ticker))
-        finviz_g = float(np.clip(raw_finviz_g, -0.35, 0.45)) if raw_finviz_g is not None else eps_cagr
-
-        raw_yahoo_g = _clean_num(yahoo_lt_growth_cache.get(ticker))
-        yahoo_g = float(np.clip(raw_yahoo_g, -0.35, 0.45)) if raw_yahoo_g is not None else eps_cagr
 
         prices_by_year = {}
         raw_tgt_2027 = _clean_num(target_price_cache.get(ticker))

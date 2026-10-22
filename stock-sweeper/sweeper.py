@@ -1,6 +1,7 @@
 import sqlite3
 import time
 import math
+import resource
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import yfinance as yf
@@ -9,6 +10,13 @@ import pandas as pd
 from datetime import datetime
 from config import DB_NAME, BATCH_SIZE, BATCH_PAUSE_SECONDS
 from sec_tickers import fetch_sec_tickers
+
+try:
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    if soft < 4096:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (min(4096, hard), hard))
+except Exception:
+    pass
 
 _session_reset_lock = threading.Lock()
 _last_session_reset = 0.0
@@ -23,6 +31,12 @@ def reset_yfinance_session(force: bool = False):
         try:
             d = YfData()
             with d._cookie_lock:
+                old_session = getattr(d, '_session', None)
+                if old_session is not None and hasattr(old_session, 'close'):
+                    try:
+                        old_session.close()
+                    except Exception:
+                        pass
                 d._session = new_session()
                 d._crumb = None
                 d._cookie = None
@@ -90,7 +104,12 @@ def extract_ticker_data(ticker_symbol: str, fetch_full_statements: bool = True) 
         try:
             yt = yf.Ticker(ticker_symbol)
             info = yt.info or {}
-            # If yt.info completed without raising a 401/429 exception, do not retry 404/delisted symbols
+            if info.get('currentPrice') or info.get('regularMarketPrice') or info.get('marketCap'):
+                break
+            if len(info) <= 2 and attempt < 2:
+                reset_yfinance_session()
+                time.sleep(1.5 * (attempt + 1))
+                continue
             break
         except Exception as e:
             err_str = str(e).lower()

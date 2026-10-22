@@ -1,7 +1,7 @@
-# config.py
+import os
 
 # Your contact email for SEC EDGAR API compliance
-USER_EMAIL = "sup.101@hotmail.com"
+USER_EMAIL = os.environ.get("SEC_USER_EMAIL", "sup.101@hotmail.com")
 
 # Local database file name
 DB_NAME = "market_data.db"
@@ -16,5 +16,5 @@ GOOGLE_CREDS_FILE = "google_credentials.json"
 BATCH_SIZE = 50
 BATCH_PAUSE_SECONDS = 0.5
 
-# API KEYs
-FINNHUB_API_KEY="d10422hr01qhkqr7oidgd10422hr01qhkqr7oie0"
+# API KEYs (Loaded from environment variables)
+FINNHUB_API_KEY = os.environ.get("FINNHUB_API_KEY", "")

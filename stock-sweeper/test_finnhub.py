@@ -3,7 +3,10 @@ from config import FINNHUB_API_KEY
 
 def test_finnhub_estimates(ticker="AAPL"):
     print(f"--- Testing Finnhub API Estimates for {ticker} ---")
-    print(f"API Key: {FINNHUB_API_KEY[:6]}...{FINNHUB_API_KEY[-4:]}\n")
+    if not FINNHUB_API_KEY:
+        print("Error: FINNHUB_API_KEY environment variable is not set.")
+        return
+    print("API Key: [Configured via Environment Variable]\n")
 
     # 1. Fetch EPS Estimates
     eps_url = f"https://finnhub.io/api/v1/stock/eps-estimate?symbol={ticker}&token={FINNHUB_API_KEY}"

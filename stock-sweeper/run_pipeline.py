@@ -6,11 +6,19 @@ Orchestrates: Database Init -> Ingestion -> Screening -> Enrichment -> Projectio
 
 import os
 import sys
+import resource
 import argparse
 import sqlite3
 import traceback
 from datetime import datetime
 from config import DB_NAME
+
+try:
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    if soft < 4096:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (min(4096, hard), hard))
+except Exception:
+    pass
 
 def check_db_health():
     if not os.path.exists(DB_NAME):
