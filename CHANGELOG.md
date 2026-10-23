@@ -11,7 +11,52 @@ All notable changes, features, bug fixes, and performance optimizations across t
 
 ---
 
-## [Unreleased] — 2026-10-21 (Rate-Limit Pacing, SQLite Caching & Full Dataset Backfill)
+## [Unreleased] — 2026-10-23 (Architecture Refactor, Valuation Distortion Fixes, Asymmetric Moonshot Track & Dual-Survivor Log)
+
+### ✨ Features
+- **Four-Tier Portfolio Categorization & `$500M` Floor (`utils.py`, `screener.py`, `sweeper.py`)**: Lowered the main compounder screener floor from `$1B` to `$500M` (`204` shortlisted compounders) and standardized portfolio tiers across the entire codebase:
+  - `Small-Cap ($500M-$5B)`
+  - `Mid-Cap ($5B-$50B)`
+  - `Large-Cap ($50B-$1T)`
+  - `Mega-Cap ($1T+)`
+  - `Micro-Cap (<$500M)`
+- **Uniform Main Compounder Pipeline + Separate Mega-Cap Watchlist (`qualitative_scorer.py`)**: Applied identical post-enrichment compounder hurdles across all market-cap tiers (`Total Moat Score >= 70.0`, `3Y Share Dilution CAGR <= 3.5%/yr`, and `5Y Projected CAGR >= 8.0%/yr`) with zero special exemptions in `exports/qualitative_moat_leaderboard.csv`, while publishing all `$1T+` Mega-Caps separately to `exports/mega_cap_watch_leaderboard.csv` for swing-trading and valuation anchoring.
+- **Asymmetric 5x Moonshot / Inflection Screener & Scorer (`moonshot_screener.py`)**: Added Step 9 to screen `$300M–$10B` high-torque inflection plays (`Revenue Growth 25%–300%` with `>= 30%` top/bottom-line acceleration, `Current Ratio >= 1.5`, `Debt/Equity <= 1.0`, `Operating Margin >= -15%`, `Forward P/E > 0`, `Beta >= 1.15`) and score them on a **100-Point Asymmetric Inflection Framework** (Survival Runway, Growth Velocity, Operating Torque, 3Y Re-Rating Upside, Insider & Size Torque), exporting to `exports/asymmetric_moonshot_leaderboard.csv`.
+- **Persistent Dual-Survivor Overlap Tracker (`moonshot_screener.py`)**: Automatically detects companies that survive **both** the Main Compounder Screener and the Asymmetric Moonshot Screener on any run, highlights them in the console, and maintains a cumulative historical ledger in `exports/dual_survivor_overlap_log.csv` (`First Seen Date`, `Last Seen Date`, `Times Appeared`, `Active on Latest Run`).
+- **Upgraded 7-Pillar Qualitative Moat Scorer (`qualitative_scorer.py`)**:
+  - **Pillar 1 (15 pts)**: Separated Net Open-Market Insider Buying (`15 pts`) from Zero Activity / Neutral (`10 pts`).
+  - **Pillar 5 (20 pts) & Pillar 6 (15 pts)**: Upgraded to use true GAAP `Gross Profit` and `SG&A Expense` extracted from SEC EDGAR 10-K XBRL tags and `yfinance` financials.
+  - **Pillar 7 (15 pts — Option B)**: Applied uniformly across all tiers—awards `15 pts` for Top 500 Global Brand recognition, or scores up to `15 pts` on Self-Funding Revenue Growth (`10%–28%` + `FCF > 0`, up to `8 pts`) and Share Dilution Discipline (`3Y Share CAGR <= +1.2%`, up to `7 pts`).
+
+### 🐛 Bug Fixes
+- **Foreign Currency / ADR Consensus Normalization (`exporter.py`, `enricher.py`)**: Added currency ratio detection and FX scaling so foreign-currency consensus EPS/Revenue estimates (e.g., `KARO` in `ZAR`, `TSM` in `TWD`, `SONY` in `JPY`) are normalized to USD before computing forward P/E and 5-year price targets.
+- **Smooth Year 1 $\rightarrow$ Year 5 P/E Multiple Transition (`exporter.py`)**: Anchored Year 1 `robust_pe` to the current forward P/E regime and interpolated smoothly from Year 1 to Year 5 `terminal_pe_target`, eliminating artificial 2027 $\rightarrow$ 2028 single-year step-function jumps (e.g., `CRM`, `RAMP`, `CARG`).
+- **Realistic 5Y Growth Bounds & Mean-Reverting Decay (`exporter.py`, `enricher.py`)**: Removed the single-quarter YoY `earningsGrowth` fallback from `yahoo_lt_growth`, bounded 5Y growth inputs to `[-25%, +30%]`, and added `_compounded_growth_factor()` to gently decay excess growth above `18%/yr`.
+- **Stock-Split, ADR Ratio & Dual-Class Share Count Normalization (`exporter.py`, `enricher.py`)**: Used `max(sharesOutstanding, impliedSharesOutstanding)` in `enricher.py` and normalized historical YoY share-count discontinuities (`>1.75x` or `<0.55x`) in `exporter.py` so split stocks (`NVDA`, `AVGO`), ADRs (`TSM`), and dual-class shares (`GOOGL`) compute accurate split-adjusted EPS and `3Y Share Dilution CAGR (%)`.
+
+### 🛠️ Tooling, Architecture & Database
+- **Codebase Consolidation (`config.py`, `utils.py`, `database.py`)**: Centralized all export paths, numeric helpers (`is_valid_num()`, `clean_float()`), file descriptor limits (`ensure_file_limits()`), tier classification (`classify_market_cap_tier()`), and WAL-enabled SQLite connections (`get_db_connection()`).
+- **Tighter Tiered Sweep Cache TTL (`sweeper.py`)**: Lowered the 24-hour refresh threshold from `$300M` to `$100M` (`market_cap >= $100M`) and shortened the inactive / deep micro-cap (`< $100M`) refresh TTL from 30 days to **7 days** so rising small-caps are caught weekly.
+- **macOS Daily LaunchAgent Automation (`run_daily_job.sh`, `~/Library/LaunchAgents/com.stocksweeper.daily.plist`)**: Added a date-stamped daily runner (`run_daily_job.sh`) and registered a macOS `launchd` agent (`com.stocksweeper.daily`) with `RunAtLoad` and hourly wake checks so the pipeline runs automatically once per calendar day whenever the Mac is turned on or woken up.
+- **Schema Migrations (`database.py`)**: Added non-destructive `ALTER TABLE` migrations for `company_overview.gross_margins`, `financial_records.gross_profit`, and `financial_records.sga_expense`.
+
+---
+
+## [2026-10-22] — Valuation Realism, Standardized Leaderboards & 7-Pillar Qualitative Moat Scorer
+
+### ✨ Features
+- **3-Year Share Count Drift (`exporter.py`, `generate_summary.py`)**: Added trailing 3-year historical share count CAGR (`share_cagr`, clipped to `[-10%, +15%]`) so projected share counts scale dynamically across forecast years `k = 1..4` (`proj_shares = shares_m * ((1 + share_cagr) ** k)`), and exposed `3Y Share Dilution CAGR (%)` in the leaderboards.
+- **Standardized Export Filenames & Historical Price Checkpoints (`exporter.py`, `generate_summary.py`)**:
+  - Renamed `exports/15y_export.csv` $\rightarrow$ `exports/valuation_model_timeline.csv` and `exports/screener_summary_leaderboard.csv` $\rightarrow$ `exports/fundamental_screener_leaderboard.csv`.
+  - Added `10Y-6Y Historical Max/Min Price ($)`, `5Y Ago`, `4Y Ago`, `3Y Ago`, and `1Y Ago Price ($)` checkpoints.
+- **7-Pillar Qualitative Moat Scorer (`qualitative_scorer.py`)**: Added standalone 100-point qualitative moat evaluation across Insider Alignment, CEO Ownership, ROIC Trajectory, Culture/Governance, Gross Margin Pricing Power, SG&A Operating Leverage, and Brand Recognition.
+
+### 🗄️ Database & Schema
+- Enabled SQLite Write-Ahead Logging (`PRAGMA journal_mode = WAL;`) and `PRAGMA synchronous = NORMAL;` across all connections in `database.py`.
+
+---
+
+## [2026-10-21] — Rate-Limit Pacing, SQLite Caching & Full Dataset Backfill
 
 ### ⚡ Optimizations
 - **Tiered 30-Day / 24-Hour Sweep Cache TTL (`sweeper.py`)**: Active mid/large-cap companies (`market_cap >= $300M`) refresh every 24 hours, while inactive/delisted/404 tickers (`is_active = 0`) and deep micro-caps (`< $300M`) are cached for 30 days, reducing future full-market sweeps from ~8,763 tickers to ~3,000 tickers (~12 minutes).
@@ -23,9 +68,9 @@ All notable changes, features, bug fixes, and performance optimizations across t
 
 ### 🐛 Bug Fixes
 - **Dynamic Sector + PEG-Anchored P/E Ceiling (`exporter.py`)**: Replaced unbounded historical median P/E multiples with a dynamic sector-peer and growth-adjusted P/E ceiling (`peg_terminal_ceiling = min(45.0, max(sec_pe * 1.15, sec_pe + expected_g * 85))`) and starting P/E normalization (`starting_pe_ceiling = min(60.0, max(fwd_pe * 1.35, peg_terminal_ceiling * 1.25))`), preventing turnaround stocks with near-zero historical EPS (e.g., 500x trailing P/E) from extrapolating hyper-inflated multiples into 2031.
-- **Environment Variable API Key Security (`config.py`, `test_finnhub.py`)**: Moved `FINNHUB_API_KEY` from plaintext in `config.py` to `os.environ.get("FINNHUB_API_KEY", "")` and masked key output in `test_finnhub.py`.
+- **Environment Variable API Key Security (`config.py`)**: Moved `FINNHUB_API_KEY` from plaintext in `config.py` to `os.environ.get("FINNHUB_API_KEY", "")`.
 - **Mid-Batch Crumb Expiration Recovery**: Updated `run_sweeper()` in `sweeper.py` to detect partial batch failures (`< 40%` active companies returned in a batch of 50), automatically reset the `yfinance` `curl_cffi` session/crumb (`reset_yfinance_session()`), and retry only the unscraped tickers from that batch.
-- **Full 15-Year Timeline & Projection Backfill**: Expanded XBRL/IFRS concept mappings in `enricher.py`, added fallback `0y`/`+1y` consensus projection rows when analyst estimate tables are sparse, and populated base financial columns (`Revenue ($M)`, `Net Income ($M)`, `Net Profit Margin (%)`, `Diluted EPS ($)`, `P/E Ratio`, `Forward P/E`, `Current Ratio`, `Debt to Equity`, `Beta`) across all forecast rows (2028–2031) in `exports/15y_export.csv`.
+- **Full 15-Year Timeline & Projection Backfill**: Expanded XBRL/IFRS concept mappings in `enricher.py`, added fallback `0y`/`+1y` consensus projection rows when analyst estimate tables are sparse, and populated base financial columns (`Revenue ($M)`, `Net Income ($M)`, `Net Profit Margin (%)`, `Diluted EPS ($)`, `P/E Ratio`, `Forward P/E`, `Current Ratio`, `Debt to Equity`, `Beta`) across all forecast rows (2028–2031).
 
 ### 🗄️ Database & Schema
 - Added non-destructive `ALTER TABLE` column migrations in `database.py` for `target_mean_price`, `finviz_eps_5y`, and `yahoo_lt_growth` on `company_overview`, and `year_end_price`, `consensus_eps_growth`, and `consensus_rev_growth` on `financial_records`.

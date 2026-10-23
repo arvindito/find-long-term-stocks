@@ -1,10 +1,11 @@
-import sqlite3
 import pandas as pd
 from config import DB_NAME
+from database import get_db_connection
+from utils import classify_market_cap_tier
 
 
 def run_screener(
-    min_market_cap: float = 1_000_000_000,
+    min_market_cap: float = 500_000_000,
     min_current_ratio: float = 0.5,
     max_debt_to_equity: float = 2.0,
     min_beta: float = 0.7,
@@ -15,9 +16,10 @@ def run_screener(
     min_roic: float = 0.10,
 ) -> pd.DataFrame:
     """
-    Applies fundamental quality filters including Free Cash Flow and ROIC hurdles.
+    Applies fundamental quality filters including Free Cash Flow and ROIC hurdles
+    across all active companies >= $500M (Small-Cap, Mid-Cap, Large-Cap, and Mega-Cap).
     """
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_db_connection(DB_NAME)
 
     query = """
     SELECT 
@@ -68,6 +70,9 @@ def run_screener(
     )
     conn.close()
 
+    if not df.empty:
+        df["market_cap_tier"] = df["market_cap"].apply(classify_market_cap_tier)
+
     print(f"Screener complete: Found {len(df)} matching stocks.")
     return df
 
@@ -78,6 +83,6 @@ if __name__ == "__main__":
         print("\n--- Shortlisted Candidates ---")
         print(
             shortlist[
-                ['ticker', 'company_name', 'current_price', 'forward_pe', 'operating_margins', 'free_cash_flow', 'roic']
+                ["ticker", "company_name", "market_cap_tier", "current_price", "forward_pe", "operating_margins", "roic"]
             ].to_string(index=False)
         )

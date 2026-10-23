@@ -1,33 +1,20 @@
-import sqlite3
 import time
-import math
 import random
-import requests
 import re
+from datetime import datetime
+import requests
 import pandas as pd
 import yfinance as yf
 from bs4 import BeautifulSoup
-from datetime import datetime
-from config import DB_NAME, USER_EMAIL
-from screener import run_screener
 from edgar import set_identity, Company
 
+from config import DB_NAME, USER_EMAIL
+from database import init_db, get_db_connection
+from screener import run_screener
+from utils import clean_float, ensure_file_limits
+
+ensure_file_limits()
 set_identity(f"StockSweeper/1.0 {USER_EMAIL}")
-
-
-def _clean_float(val):
-    if val is None:
-        return None
-    try:
-        if pd.isna(val):
-            return None
-        f = float(val)
-        if math.isnan(f) or math.isinf(f):
-            return None
-        return f
-    except (ValueError, TypeError):
-        return None
-
 
 _last_finviz_call = 0.0
 _last_sec_call = 0.0
@@ -43,20 +30,20 @@ def fetch_finviz_eps_next_5y(ticker: str, max_retries: int = 3):
         time.sleep(0.45 - elapsed)
 
     url = f"https://finviz.com/quote.ashx?t={ticker}"
-    headers = {'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)'}
+    headers = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"}
     for attempt in range(max_retries):
         try:
             _last_finviz_call = time.time()
             resp = requests.get(url, headers=headers, timeout=8)
             if resp.status_code == 200:
-                soup = BeautifulSoup(resp.text, 'html.parser')
-                label_cell = soup.find(string=re.compile(r'EPS next 5Y', re.I))
+                soup = BeautifulSoup(resp.text, "html.parser")
+                label_cell = soup.find(string=re.compile(r"EPS next 5Y", re.I))
                 if label_cell:
-                    parent_td = label_cell.find_parent('td')
-                    val_cell = parent_td.find_next_sibling('td') if parent_td else None
+                    parent_td = label_cell.find_parent("td")
+                    val_cell = parent_td.find_next_sibling("td") if parent_td else None
                     if val_cell:
-                        raw_val = val_cell.text.strip().replace('%', '')
-                        val = _clean_float(raw_val)
+                        raw_val = val_cell.text.strip().replace("%", "")
+                        val = clean_float(raw_val)
                         if val is not None:
                             return val / 100.0
                 return None
@@ -70,18 +57,26 @@ def fetch_finviz_eps_next_5y(ticker: str, max_retries: int = 3):
     return None
 
 
-def fetch_batch_historical_year_end_prices(tickers: list[str], start_year: int, end_year: int, chunk_size: int = 50) -> dict[str, dict[int, float]]:
+def fetch_batch_historical_year_end_prices(
+    tickers: list[str], start_year: int, end_year: int, chunk_size: int = 50
+) -> dict[str, dict[int, float]]:
     """
     Fetches historical year-end prices in multi-ticker batches using yf.download to minimize HTTP calls.
     """
     all_price_maps = {t: {} for t in tickers}
     for i in range(0, len(tickers), chunk_size):
-        chunk = tickers[i:i + chunk_size]
+        chunk = tickers[i : i + chunk_size]
         for attempt in range(3):
             try:
-                data = yf.download(chunk, start=f"{start_year}-01-01", end=f"{end_year+1}-01-15", progress=False, threads=True)
-                if not data.empty and 'Close' in data:
-                    close_df = data['Close']
+                data = yf.download(
+                    chunk,
+                    start=f"{start_year}-01-01",
+                    end=f"{end_year+1}-01-15",
+                    progress=False,
+                    threads=True,
+                )
+                if not data.empty and "Close" in data:
+                    close_df = data["Close"]
                     for t in chunk:
                         if isinstance(close_df, pd.DataFrame):
                             if t not in close_df.columns:
@@ -92,7 +87,7 @@ def fetch_batch_historical_year_end_prices(tickers: list[str], start_year: int, 
                         for yr in range(start_year, end_year + 1):
                             yr_data = s_close[s_close.index.year == yr]
                             if not yr_data.empty:
-                                cleaned = _clean_float(yr_data.iloc[-1])
+                                cleaned = clean_float(yr_data.iloc[-1])
                                 if cleaned is not None:
                                     all_price_maps[t][yr] = cleaned
                 break
@@ -108,13 +103,13 @@ def fetch_historical_year_end_prices(ticker: str, start_year: int, end_year: int
         try:
             data = yf.download(ticker, start=f"{start_year}-01-01", end=f"{end_year+1}-01-15", progress=False)
             if not data.empty:
-                close_data = data['Close'][ticker] if isinstance(data.columns, pd.MultiIndex) else data['Close']
+                close_data = data["Close"][ticker] if isinstance(data.columns, pd.MultiIndex) else data["Close"]
                 close_data = close_data.dropna()
 
                 for yr in range(start_year, end_year + 1):
                     yr_data = close_data[close_data.index.year == yr]
                     if not yr_data.empty:
-                        cleaned = _clean_float(yr_data.iloc[-1])
+                        cleaned = clean_float(yr_data.iloc[-1])
                         if cleaned is not None:
                             price_map[yr] = cleaned
             break
@@ -147,67 +142,113 @@ def fetch_sec_historical_years_5_to_10(ticker: str, current_year: int, price_map
             if df.empty:
                 return []
 
-            if 'fiscal_period' in df.columns:
-                df_fy = df[(df['fiscal_period'] == 'FY') & (df['fiscal_year'] >= min_year) & (df['fiscal_year'] <= max_year)].copy()
+            if "fiscal_period" in df.columns:
+                df_fy = df[
+                    (df["fiscal_period"] == "FY")
+                    & (df["fiscal_year"] >= min_year)
+                    & (df["fiscal_year"] <= max_year)
+                ].copy()
             else:
-                df_fy = df[(df['fiscal_year'] >= min_year) & (df['fiscal_year'] <= max_year)].copy()
+                df_fy = df[(df["fiscal_year"] >= min_year) & (df["fiscal_year"] <= max_year)].copy()
 
             if df_fy.empty:
                 return []
 
-            val_col = 'numeric_value' if 'numeric_value' in df_fy.columns else 'value'
+            val_col = "numeric_value" if "numeric_value" in df_fy.columns else "value"
 
             concept_map = {
-                'revenue': ['revenues', 'revenuefromcontractwithcustomerexcludingassessedtax', 'salesrevenuenet', 'totalrevenuesandotherincome', 'revenue', 'interestanddividendincomeoperating', 'revenuesnetofinterestexpense'],
-                'net_income': ['netincomeloss', 'profitloss', 'netincomelossavailabletocommonstockholdersbasic', 'profitlossattributabletoownersofparent'],
-                'eps_diluted': ['earningspersharediluted', 'earningspersharebasic', 'dilutedearningslosspershare', 'basicearningslosspershare'],
-                'shares_outstanding': ['weightedaveragenumberofdilutedsharesoutstanding', 'commonstocksharesoutstanding', 'entitycommonstocksharesoutstanding', 'weightedaverageshares', 'adjustedweightedaverageshares'],
-                'total_assets': ['assets'],
-                'total_liabilities': ['liabilities', 'liabilitiesandstockholdersequity'],
-                'current_assets': ['assetscurrent', 'currentassets'],
-                'current_liabilities': ['liabilitiescurrent', 'currentliabilities'],
-                'operating_cash_flow': ['netcashprovidedbyusedinoperatingactivities', 'netcashprovidedbyusedinoperatingactivitiescontinuingoperations', 'cashflowsfromusedinoperatingactivities'],
-                'capital_expenditures': ['paymentstoacquirepropertyplantandequipment', 'paymentstoacquireproductiveassets', 'purchaseofpropertyplantandequipmentclassifiedasinvestingactivities'],
+                "revenue": [
+                    "revenues",
+                    "revenuefromcontractwithcustomerexcludingassessedtax",
+                    "salesrevenuenet",
+                    "totalrevenuesandotherincome",
+                    "revenue",
+                    "interestanddividendincomeoperating",
+                    "revenuesnetofinterestexpense",
+                ],
+                "gross_profit": [
+                    "grossprofit",
+                ],
+                "sga_expense": [
+                    "sellinggeneralandadministrativeexpense",
+                    "generalandadministrativeexpense",
+                    "sellingandmarketingexpense",
+                ],
+                "net_income": [
+                    "netincomeloss",
+                    "profitloss",
+                    "netincomelossavailabletocommonstockholdersbasic",
+                    "profitlossattributabletoownersofparent",
+                ],
+                "eps_diluted": [
+                    "earningspersharediluted",
+                    "earningspersharebasic",
+                    "dilutedearningslosspershare",
+                    "basicearningslosspershare",
+                ],
+                "shares_outstanding": [
+                    "weightedaveragenumberofdilutedsharesoutstanding",
+                    "commonstocksharesoutstanding",
+                    "entitycommonstocksharesoutstanding",
+                    "weightedaverageshares",
+                    "adjustedweightedaverageshares",
+                ],
+                "total_assets": ["assets"],
+                "total_liabilities": ["liabilities", "liabilitiesandstockholdersequity"],
+                "current_assets": ["assetscurrent", "currentassets"],
+                "current_liabilities": ["liabilitiescurrent", "currentliabilities"],
+                "operating_cash_flow": [
+                    "netcashprovidedbyusedinoperatingactivities",
+                    "netcashprovidedbyusedinoperatingactivitiescontinuingoperations",
+                    "cashflowsfromusedinoperatingactivities",
+                ],
+                "capital_expenditures": [
+                    "paymentstoacquirepropertyplantandequipment",
+                    "paymentstoacquireproductiveassets",
+                    "purchaseofpropertyplantandequipmentclassifiedasinvestingactivities",
+                ],
             }
 
             records_by_year = {}
             for fy in range(min_year, max_year + 1):
                 records_by_year[fy] = {
-                    'ticker': ticker,
-                    'year': fy,
-                    'period_type': 'Historical',
-                    'revenue': None,
-                    'net_income': None,
-                    'net_income_margin': None,
-                    'eps_diluted': None,
-                    'shares_outstanding': None,
-                    'total_assets': None,
-                    'total_liabilities': None,
-                    'current_assets': None,
-                    'current_liabilities': None,
-                    'operating_cash_flow': None,
-                    'capital_expenditures': None,
-                    'free_cash_flow': None,
-                    'pe_ratio': None,
-                    'year_end_price': price_map.get(fy),
-                    'consensus_eps_growth': None,
-                    'consensus_rev_growth': None,
-                    'source_provider': 'SEC_EDGAR_10K',
-                    'updated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                    "ticker": ticker,
+                    "year": fy,
+                    "period_type": "Historical",
+                    "revenue": None,
+                    "gross_profit": None,
+                    "sga_expense": None,
+                    "net_income": None,
+                    "net_income_margin": None,
+                    "eps_diluted": None,
+                    "shares_outstanding": None,
+                    "total_assets": None,
+                    "total_liabilities": None,
+                    "current_assets": None,
+                    "current_liabilities": None,
+                    "operating_cash_flow": None,
+                    "capital_expenditures": None,
+                    "free_cash_flow": None,
+                    "pe_ratio": None,
+                    "year_end_price": price_map.get(fy),
+                    "consensus_eps_growth": None,
+                    "consensus_rev_growth": None,
+                    "source_provider": "SEC_EDGAR_10K",
+                    "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 }
 
             for _, row in df_fy.iterrows():
                 try:
-                    fy = int(row['fiscal_year'])
+                    fy = int(row["fiscal_year"])
                 except (ValueError, TypeError):
                     continue
 
                 if fy not in records_by_year:
                     continue
 
-                raw_concept = str(row.get('concept', '')).lower()
-                clean_concept = raw_concept.split(':')[-1] if ':' in raw_concept else raw_concept
-                num_val = _clean_float(row.get(val_col))
+                raw_concept = str(row.get("concept", "")).lower()
+                clean_concept = raw_concept.split(":")[-1] if ":" in raw_concept else raw_concept
+                num_val = clean_float(row.get(val_col))
 
                 if num_val is not None:
                     for field, concept_list in concept_map.items():
@@ -216,19 +257,21 @@ def fetch_sec_historical_years_5_to_10(ticker: str, current_year: int, price_map
 
             valid_records = []
             for fy, rec in records_by_year.items():
-                if rec['revenue'] is not None or rec['net_income'] is not None or rec['total_assets'] is not None:
-                    if rec['revenue'] and rec['net_income'] is not None and rec['revenue'] != 0:
-                        rec['net_income_margin'] = _clean_float(rec['net_income'] / rec['revenue'])
+                if rec["revenue"] is not None or rec["net_income"] is not None or rec["total_assets"] is not None:
+                    if rec["revenue"] and rec["net_income"] is not None and rec["revenue"] != 0:
+                        rec["net_income_margin"] = clean_float(rec["net_income"] / rec["revenue"])
 
-                    if rec['operating_cash_flow'] is not None and rec['capital_expenditures'] is not None:
-                        capex_val = rec['capital_expenditures']
-                        rec['free_cash_flow'] = _clean_float(
-                            rec['operating_cash_flow'] + capex_val if capex_val <= 0 else rec['operating_cash_flow'] - capex_val
+                    if rec["operating_cash_flow"] is not None and rec["capital_expenditures"] is not None:
+                        capex_val = rec["capital_expenditures"]
+                        rec["free_cash_flow"] = clean_float(
+                            rec["operating_cash_flow"] + capex_val
+                            if capex_val <= 0
+                            else rec["operating_cash_flow"] - capex_val
                         )
 
                     year_end_price = price_map.get(fy)
-                    if year_end_price and rec['eps_diluted'] and rec['eps_diluted'] > 0:
-                        rec['pe_ratio'] = _clean_float(year_end_price / rec['eps_diluted'])
+                    if year_end_price and rec["eps_diluted"] and rec["eps_diluted"] > 0:
+                        rec["pe_ratio"] = clean_float(year_end_price / rec["eps_diluted"])
 
                     valid_records.append(rec)
 
@@ -246,36 +289,46 @@ def fetch_sec_historical_years_5_to_10(ticker: str, current_year: int, price_map
 
 def fetch_yahoo_current_and_consensus(ticker: str, current_year: int, price_map: dict, max_retries: int = 3):
     records = []
-    overview_meta = {'target_mean_price': None, 'yahoo_lt_growth': None}
+    overview_meta = {"target_mean_price": None, "yahoo_lt_growth": None, "gross_margins": None}
     for attempt in range(max_retries):
         try:
             yt = yf.Ticker(ticker)
             info = yt.info or {}
             rev_est = yt.revenue_estimate
             eps_est = yt.earnings_estimate
-            shares = _clean_float(info.get('sharesOutstanding'))
+            raw_sh = clean_float(info.get("sharesOutstanding"))
+            imp_sh = clean_float(info.get("impliedSharesOutstanding"))
+            shares = max(raw_sh or 0.0, imp_sh or 0.0) if (raw_sh or imp_sh) else None
 
-            overview_meta['target_mean_price'] = _clean_float(info.get('targetMeanPrice'))
-            raw_y_lt = _clean_float(info.get('longTermPotentialGrowth'))
-            if raw_y_lt is None:
-                raw_y_lt = _clean_float(info.get('earningsGrowth'))
-            overview_meta['yahoo_lt_growth'] = raw_y_lt
+            overview_meta["target_mean_price"] = clean_float(info.get("targetMeanPrice"))
+            overview_meta["gross_margins"] = clean_float(info.get("grossMargins"))
 
-            ttm_rev = _clean_float(info.get('totalRevenue'))
-            ttm_eps = _clean_float(info.get('trailingEps'))
-            ttm_netinc = _clean_float(ttm_eps * shares) if (ttm_eps is not None and shares is not None) else None
-            ttm_margin = _clean_float(ttm_netinc / ttm_rev) if (ttm_netinc is not None and ttm_rev is not None and ttm_rev != 0) else None
+            # Prefer true multi-year LT growth or +1y consensus EPS growth over single-quarter YoY earningsGrowth
+            raw_y_lt = clean_float(info.get("longTermPotentialGrowth"))
+            if raw_y_lt is None and isinstance(eps_est, pd.DataFrame):
+                if "+1y" in eps_est.index and "growth" in eps_est.columns:
+                    raw_y_lt = clean_float(eps_est.loc["+1y", "growth"])
+            overview_meta["yahoo_lt_growth"] = raw_y_lt
 
-            curr_price = _clean_float(info.get('currentPrice') or info.get('regularMarketPrice'))
-            pe_curr = _clean_float(curr_price / ttm_eps) if (curr_price is not None and ttm_eps is not None and ttm_eps > 0) else None
+            curr_price = clean_float(info.get("currentPrice") or info.get("regularMarketPrice"))
+            info_fwd_pe = clean_float(info.get("forwardPE"))
+            ttm_rev = clean_float(info.get("totalRevenue"))
+            ttm_eps = clean_float(info.get("trailingEps"))
+            ttm_gross = clean_float(info.get("grossProfits"))
+            if ttm_gross is None and ttm_rev and overview_meta["gross_margins"]:
+                ttm_gross = clean_float(ttm_rev * overview_meta["gross_margins"])
 
-            tot_assets = _clean_float(info.get('totalAssets'))
+            ttm_netinc = clean_float(ttm_eps * shares) if (ttm_eps is not None and shares is not None) else None
+            ttm_margin = clean_float(ttm_netinc / ttm_rev) if (ttm_netinc is not None and ttm_rev is not None and ttm_rev != 0) else None
+            pe_curr = clean_float(curr_price / ttm_eps) if (curr_price is not None and ttm_eps is not None and ttm_eps > 0) else None
+
+            tot_assets = clean_float(info.get("totalAssets"))
             tot_liab = None
             curr_assets = None
             curr_liab = None
-            ocf = _clean_float(info.get('operatingCashflow'))
-            fcf = _clean_float(info.get('freeCashflow'))
-            capex = _clean_float(fcf - ocf) if (fcf is not None and ocf is not None) else None
+            ocf = clean_float(info.get("operatingCashflow"))
+            fcf = clean_float(info.get("freeCashflow"))
+            capex = clean_float(fcf - ocf) if (fcf is not None and ocf is not None) else None
 
             try:
                 bs = yt.balance_sheet
@@ -285,93 +338,108 @@ def fetch_yahoo_current_and_consensus(ticker: str, current_year: int, price_map:
                     def get_bs_val(keys):
                         for k in keys:
                             if k in bs.index:
-                                val = _clean_float(bs.loc[k, latest_col])
+                                val = clean_float(bs.loc[k, latest_col])
                                 if val is not None:
                                     return val
                         return None
 
-                    tot_assets = tot_assets or get_bs_val(['Total Assets'])
-                    tot_liab = get_bs_val(['Total Liabilities Net Minority Interest', 'Total Debt', 'Total Liabilities'])
-                    curr_assets = get_bs_val(['Current Assets', 'Total Current Assets'])
-                    curr_liab = get_bs_val(['Current Liabilities', 'Total Current Liabilities'])
+                    tot_assets = tot_assets or get_bs_val(["Total Assets"])
+                    tot_liab = get_bs_val(["Total Liabilities Net Minority Interest", "Total Debt", "Total Liabilities"])
+                    curr_assets = get_bs_val(["Current Assets", "Total Current Assets"])
+                    curr_liab = get_bs_val(["Current Liabilities", "Total Current Liabilities"])
             except Exception:
                 pass
 
             records.append((
-                ticker, current_year, 'Historical',
-                ttm_rev, ttm_netinc, ttm_margin, ttm_eps, shares,
+                ticker, current_year, "Historical",
+                ttm_rev, ttm_gross, None, ttm_netinc, ttm_margin, ttm_eps, shares,
                 tot_assets, tot_liab, curr_assets, curr_liab,
                 ocf, capex, fcf, pe_curr,
                 curr_price, None, None,
-                'YahooFinance', datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                "YahooFinance", datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             ))
 
-            if isinstance(rev_est, pd.DataFrame) and '0y' in rev_est.index:
-                r_0y = _clean_float(rev_est.loc['0y', 'avg']) if 'avg' in rev_est.columns else None
-                e_0y = _clean_float(eps_est.loc['0y', 'avg']) if (isinstance(eps_est, pd.DataFrame) and '0y' in eps_est.index and 'avg' in eps_est.columns) else None
-                rg_0y = _clean_float(rev_est.loc['0y', 'growth']) if 'growth' in rev_est.columns else None
-                eg_0y = _clean_float(eps_est.loc['0y', 'growth']) if (isinstance(eps_est, pd.DataFrame) and '0y' in eps_est.index and 'growth' in eps_est.columns) else None
-                net_inc_0y = _clean_float(e_0y * shares) if (e_0y is not None and shares is not None) else None
-                margin_0y = _clean_float(net_inc_0y / r_0y) if (net_inc_0y is not None and r_0y is not None and r_0y != 0) else None
-                fwd_pe = _clean_float(curr_price / e_0y) if (curr_price is not None and e_0y is not None and e_0y > 0) else _clean_float(info.get('forwardPE'))
+            # Detect foreign currency mismatch in analyst consensus estimates (e.g., ZAR/TWD/JPY vs USD trading price)
+            fx_scale = 1.0
+            trade_curr = str(info.get("currency", "USD")).upper()
+            fin_curr = str(info.get("financialCurrency", trade_curr)).upper()
+            if trade_curr != fin_curr and isinstance(eps_est, pd.DataFrame) and "+1y" in eps_est.index and "avg" in eps_est.columns:
+                raw_e1y = clean_float(eps_est.loc["+1y", "avg"])
+                if raw_e1y and raw_e1y > 0 and curr_price and info_fwd_pe and info_fwd_pe > 0:
+                    implied_usd_eps = curr_price / info_fwd_pe
+                    if abs(raw_e1y / implied_usd_eps - 1.0) > 0.35:
+                        fx_scale = implied_usd_eps / raw_e1y
+
+            if isinstance(rev_est, pd.DataFrame) and "0y" in rev_est.index:
+                raw_r0y = clean_float(rev_est.loc["0y", "avg"]) if "avg" in rev_est.columns else None
+                raw_e0y = clean_float(eps_est.loc["0y", "avg"]) if (isinstance(eps_est, pd.DataFrame) and "0y" in eps_est.index and "avg" in eps_est.columns) else None
+                r_0y = clean_float(raw_r0y * fx_scale) if raw_r0y is not None else None
+                e_0y = clean_float(raw_e0y * fx_scale) if raw_e0y is not None else None
+                rg_0y = clean_float(rev_est.loc["0y", "growth"]) if "growth" in rev_est.columns else None
+                eg_0y = clean_float(eps_est.loc["0y", "growth"]) if (isinstance(eps_est, pd.DataFrame) and "0y" in eps_est.index and "growth" in eps_est.columns) else None
+                net_inc_0y = clean_float(e_0y * shares) if (e_0y is not None and shares is not None) else None
+                margin_0y = clean_float(net_inc_0y / r_0y) if (net_inc_0y is not None and r_0y is not None and r_0y != 0) else None
+                fwd_pe = clean_float(curr_price / e_0y) if (curr_price is not None and e_0y is not None and e_0y > 0) else info_fwd_pe
 
                 records.append((
-                    ticker, current_year, 'Projected',
-                    r_0y, net_inc_0y, margin_0y, e_0y, shares,
+                    ticker, current_year, "Projected",
+                    r_0y, None, None, net_inc_0y, margin_0y, e_0y, shares,
                     tot_assets, tot_liab, curr_assets, curr_liab,
                     ocf, capex, fcf, fwd_pe,
                     curr_price, eg_0y, rg_0y,
-                    'Yahoo_Consensus', datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                    "Yahoo_Consensus", datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 ))
             else:
-                e_0y = _clean_float(info.get('forwardEps')) or ttm_eps
+                e_0y = clean_float(info.get("forwardEps")) or ttm_eps
                 r_0y = ttm_rev
-                eg_0y = _clean_float(info.get('earningsGrowth'))
-                rg_0y = _clean_float(info.get('revenueGrowth'))
-                net_inc_0y = _clean_float(e_0y * shares) if (e_0y is not None and shares is not None) else ttm_netinc
-                margin_0y = _clean_float(net_inc_0y / r_0y) if (net_inc_0y is not None and r_0y is not None and r_0y != 0) else ttm_margin
-                fwd_pe = _clean_float(curr_price / e_0y) if (curr_price is not None and e_0y is not None and e_0y > 0) else _clean_float(info.get('forwardPE'))
+                eg_0y = clean_float(info.get("earningsGrowth"))
+                rg_0y = clean_float(info.get("revenueGrowth"))
+                net_inc_0y = clean_float(e_0y * shares) if (e_0y is not None and shares is not None) else ttm_netinc
+                margin_0y = clean_float(net_inc_0y / r_0y) if (net_inc_0y is not None and r_0y is not None and r_0y != 0) else ttm_margin
+                fwd_pe = clean_float(curr_price / e_0y) if (curr_price is not None and e_0y is not None and e_0y > 0) else info_fwd_pe
                 records.append((
-                    ticker, current_year, 'Projected',
-                    r_0y, net_inc_0y, margin_0y, e_0y, shares,
+                    ticker, current_year, "Projected",
+                    r_0y, None, None, net_inc_0y, margin_0y, e_0y, shares,
                     tot_assets, tot_liab, curr_assets, curr_liab,
                     ocf, capex, fcf, fwd_pe,
                     curr_price, eg_0y, rg_0y,
-                    'Yahoo_Consensus', datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                    "Yahoo_Consensus", datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 ))
 
-            if isinstance(rev_est, pd.DataFrame) and '+1y' in rev_est.index:
-                r_1y = _clean_float(rev_est.loc['+1y', 'avg']) if 'avg' in rev_est.columns else None
-                e_1y = _clean_float(eps_est.loc['+1y', 'avg']) if (isinstance(eps_est, pd.DataFrame) and '+1y' in eps_est.index and 'avg' in eps_est.columns) else None
-                rg_1y = _clean_float(rev_est.loc['+1y', 'growth']) if 'growth' in rev_est.columns else None
-                eg_1y = _clean_float(eps_est.loc['+1y', 'growth']) if (isinstance(eps_est, pd.DataFrame) and '+1y' in eps_est.index and 'growth' in eps_est.columns) else None
-                net_inc_1y = _clean_float(e_1y * shares) if (e_1y is not None and shares is not None) else None
-                margin_1y = _clean_float(net_inc_1y / r_1y) if (net_inc_1y is not None and r_1y is not None and r_1y != 0) else None
-                fwd_pe_1y = _clean_float(curr_price / e_1y) if (curr_price is not None and e_1y is not None and e_1y > 0) else None
+            if isinstance(rev_est, pd.DataFrame) and "+1y" in rev_est.index:
+                raw_r1y = clean_float(rev_est.loc["+1y", "avg"]) if "avg" in rev_est.columns else None
+                raw_e1y = clean_float(eps_est.loc["+1y", "avg"]) if (isinstance(eps_est, pd.DataFrame) and "+1y" in eps_est.index and "avg" in eps_est.columns) else None
+                r_1y = clean_float(raw_r1y * fx_scale) if raw_r1y is not None else None
+                e_1y = clean_float(raw_e1y * fx_scale) if raw_e1y is not None else None
+                rg_1y = clean_float(rev_est.loc["+1y", "growth"]) if "growth" in rev_est.columns else None
+                eg_1y = clean_float(eps_est.loc["+1y", "growth"]) if (isinstance(eps_est, pd.DataFrame) and "+1y" in eps_est.index and "growth" in eps_est.columns) else None
+                net_inc_1y = clean_float(e_1y * shares) if (e_1y is not None and shares is not None) else None
+                margin_1y = clean_float(net_inc_1y / r_1y) if (net_inc_1y is not None and r_1y is not None and r_1y != 0) else None
+                fwd_pe_1y = clean_float(curr_price / e_1y) if (curr_price is not None and e_1y is not None and e_1y > 0) else None
 
                 records.append((
-                    ticker, current_year + 1, 'Projected',
-                    r_1y, net_inc_1y, margin_1y, e_1y, shares,
+                    ticker, current_year + 1, "Projected",
+                    r_1y, None, None, net_inc_1y, margin_1y, e_1y, shares,
                     None, None, None, None,
                     None, None, None, fwd_pe_1y,
-                    overview_meta['target_mean_price'], eg_1y, rg_1y,
-                    'Yahoo_Consensus', datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                    overview_meta["target_mean_price"], eg_1y, rg_1y,
+                    "Yahoo_Consensus", datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 ))
             else:
-                eg = _clean_float(info.get('earningsGrowth')) or 0.08
-                rg = _clean_float(info.get('revenueGrowth')) or 0.08
-                e_1y = _clean_float(e_0y * (1.0 + eg)) if e_0y is not None else _clean_float(info.get('forwardEps'))
-                r_1y = _clean_float(r_0y * (1.0 + rg)) if r_0y is not None else ttm_rev
-                net_inc_1y = _clean_float(e_1y * shares) if (e_1y is not None and shares is not None) else None
-                margin_1y = _clean_float(net_inc_1y / r_1y) if (net_inc_1y is not None and r_1y is not None and r_1y != 0) else None
-                fwd_pe_1y = _clean_float(curr_price / e_1y) if (curr_price is not None and e_1y is not None and e_1y > 0) else _clean_float(info.get('forwardPE'))
+                eg = clean_float(info.get("earningsGrowth")) or 0.08
+                rg = clean_float(info.get("revenueGrowth")) or 0.08
+                e_1y = clean_float(e_0y * (1.0 + eg)) if e_0y is not None else clean_float(info.get("forwardEps"))
+                r_1y = clean_float(r_0y * (1.0 + rg)) if r_0y is not None else ttm_rev
+                net_inc_1y = clean_float(e_1y * shares) if (e_1y is not None and shares is not None) else None
+                margin_1y = clean_float(net_inc_1y / r_1y) if (net_inc_1y is not None and r_1y is not None and r_1y != 0) else None
+                fwd_pe_1y = clean_float(curr_price / e_1y) if (curr_price is not None and e_1y is not None and e_1y > 0) else info_fwd_pe
                 records.append((
-                    ticker, current_year + 1, 'Projected',
-                    r_1y, net_inc_1y, margin_1y, e_1y, shares,
+                    ticker, current_year + 1, "Projected",
+                    r_1y, None, None, net_inc_1y, margin_1y, e_1y, shares,
                     None, None, None, None,
                     None, None, None, fwd_pe_1y,
-                    overview_meta['target_mean_price'], eg, rg,
-                    'Yahoo_Consensus', datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                    overview_meta["target_mean_price"], eg, rg,
+                    "Yahoo_Consensus", datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 ))
             break
 
@@ -385,7 +453,6 @@ def fetch_yahoo_current_and_consensus(ticker: str, current_year: int, price_map:
 
 
 def enrich_shortlist_history(current_year: int = None, force: bool = False):
-    from database import init_db
     init_db(reset=False)
 
     if current_year is None:
@@ -393,11 +460,19 @@ def enrich_shortlist_history(current_year: int = None, force: bool = False):
 
     print("Running SQL Screener...")
     shortlist_df = run_screener()
-    if shortlist_df.empty:
-        return
+    compounder_tickers = shortlist_df["ticker"].tolist() if not shortlist_df.empty else []
 
-    all_tickers = shortlist_df['ticker'].tolist()
-    conn = sqlite3.connect(DB_NAME)
+    try:
+        from moonshot_screener import run_moonshot_screener
+        moonshot_df = run_moonshot_screener()
+        moonshot_tickers = moonshot_df["ticker"].tolist() if not moonshot_df.empty else []
+    except Exception:
+        moonshot_tickers = []
+
+    all_tickers = list(dict.fromkeys(compounder_tickers + moonshot_tickers))
+    if not all_tickers:
+        return
+    conn = get_db_connection(DB_NAME)
     cursor = conn.cursor()
 
     cursor.execute("DELETE FROM financial_records WHERE source_provider = 'Yahoo_Extrapolated'")
@@ -428,7 +503,6 @@ def enrich_shortlist_history(current_year: int = None, force: bool = False):
 
         price_map = batch_price_maps.get(ticker) or fetch_historical_year_end_prices(ticker, current_year - 10, current_year - 1)
 
-        # Update year_end_price & pe_ratio on any existing historical rows from YahooFinance
         for yr, p_val in price_map.items():
             cursor.execute(
                 """
@@ -444,22 +518,24 @@ def enrich_shortlist_history(current_year: int = None, force: bool = False):
         if sec_records:
             records_tuple = [
                 (
-                    r['ticker'], r['year'], r['period_type'], r['revenue'], r['net_income'],
-                    r['net_income_margin'], r['eps_diluted'], r['shares_outstanding'],
-                    r['total_assets'], r['total_liabilities'], r['current_assets'],
-                    r['current_liabilities'], r['operating_cash_flow'], r['capital_expenditures'],
-                    r['free_cash_flow'], r['pe_ratio'], r['year_end_price'],
-                    r['consensus_eps_growth'], r['consensus_rev_growth'],
-                    r['source_provider'], r['updated_at']
+                    r["ticker"], r["year"], r["period_type"], r["revenue"], r["gross_profit"],
+                    r["sga_expense"], r["net_income"], r["net_income_margin"], r["eps_diluted"],
+                    r["shares_outstanding"], r["total_assets"], r["total_liabilities"],
+                    r["current_assets"], r["current_liabilities"], r["operating_cash_flow"],
+                    r["capital_expenditures"], r["free_cash_flow"], r["pe_ratio"],
+                    r["year_end_price"], r["consensus_eps_growth"], r["consensus_rev_growth"],
+                    r["source_provider"], r["updated_at"],
                 )
                 for r in sec_records
             ]
             cursor.executemany("""
             INSERT INTO financial_records 
-            (ticker, year, period_type, revenue, net_income, net_income_margin, eps_diluted, shares_outstanding, total_assets, total_liabilities, current_assets, current_liabilities, operating_cash_flow, capital_expenditures, free_cash_flow, pe_ratio, year_end_price, consensus_eps_growth, consensus_rev_growth, source_provider, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (ticker, year, period_type, revenue, gross_profit, sga_expense, net_income, net_income_margin, eps_diluted, shares_outstanding, total_assets, total_liabilities, current_assets, current_liabilities, operating_cash_flow, capital_expenditures, free_cash_flow, pe_ratio, year_end_price, consensus_eps_growth, consensus_rev_growth, source_provider, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(ticker, year, period_type) DO UPDATE SET
                 revenue = COALESCE(excluded.revenue, revenue),
+                gross_profit = COALESCE(excluded.gross_profit, gross_profit),
+                sga_expense = COALESCE(excluded.sga_expense, sga_expense),
                 net_income = COALESCE(excluded.net_income, net_income),
                 net_income_margin = COALESCE(excluded.net_income_margin, net_income_margin),
                 eps_diluted = COALESCE(excluded.eps_diluted, eps_diluted),
@@ -485,17 +561,19 @@ def enrich_shortlist_history(current_year: int = None, force: bool = False):
         cursor.execute(
             """
             UPDATE company_overview
-            SET target_mean_price = COALESCE(?, target_mean_price),
+            SET gross_margins = COALESCE(?, gross_margins),
+                target_mean_price = COALESCE(?, target_mean_price),
                 finviz_eps_5y = COALESCE(?, finviz_eps_5y),
                 yahoo_lt_growth = COALESCE(?, yahoo_lt_growth),
                 last_enriched = ?
             WHERE ticker = ?;
             """,
             (
-                overview_meta.get('target_mean_price'),
+                overview_meta.get("gross_margins"),
+                overview_meta.get("target_mean_price"),
                 finviz_5y,
-                overview_meta.get('yahoo_lt_growth'),
-                datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                overview_meta.get("yahoo_lt_growth"),
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 ticker,
             ),
         )
@@ -503,10 +581,12 @@ def enrich_shortlist_history(current_year: int = None, force: bool = False):
         if yahoo_records:
             cursor.executemany("""
             INSERT INTO financial_records 
-            (ticker, year, period_type, revenue, net_income, net_income_margin, eps_diluted, shares_outstanding, total_assets, total_liabilities, current_assets, current_liabilities, operating_cash_flow, capital_expenditures, free_cash_flow, pe_ratio, year_end_price, consensus_eps_growth, consensus_rev_growth, source_provider, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (ticker, year, period_type, revenue, gross_profit, sga_expense, net_income, net_income_margin, eps_diluted, shares_outstanding, total_assets, total_liabilities, current_assets, current_liabilities, operating_cash_flow, capital_expenditures, free_cash_flow, pe_ratio, year_end_price, consensus_eps_growth, consensus_rev_growth, source_provider, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(ticker, year, period_type) DO UPDATE SET
                 revenue = COALESCE(excluded.revenue, revenue),
+                gross_profit = COALESCE(excluded.gross_profit, gross_profit),
+                sga_expense = COALESCE(excluded.sga_expense, sga_expense),
                 net_income = COALESCE(excluded.net_income, net_income),
                 net_income_margin = COALESCE(excluded.net_income_margin, net_income_margin),
                 eps_diluted = COALESCE(excluded.eps_diluted, eps_diluted),

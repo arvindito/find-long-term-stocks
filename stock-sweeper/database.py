@@ -3,15 +3,26 @@ import sqlite3
 from config import DB_NAME
 
 
+def get_db_connection(db_name: str = DB_NAME) -> sqlite3.Connection:
+    """
+    Opens a SQLite connection configured with Write-Ahead Logging (WAL)
+    and synchronous=NORMAL for concurrent read/write performance.
+    """
+    conn = sqlite3.connect(db_name)
+    conn.execute("PRAGMA journal_mode = WAL;")
+    conn.execute("PRAGMA synchronous = NORMAL;")
+    return conn
+
+
 def init_db(reset: bool = False):
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_db_connection(DB_NAME)
     cursor = conn.cursor()
 
     if reset:
         cursor.execute("DROP TABLE IF EXISTS company_overview;")
         cursor.execute("DROP TABLE IF EXISTS financial_records;")
 
-    # Check if existing tables are missing newly required columns (FCF, ROIC, OCF, CapEx)
+    # Verify existing tables include core schema columns
     cursor.execute("PRAGMA table_info(company_overview);")
     overview_cols = {row[1] for row in cursor.fetchall()}
     if overview_cols and ("free_cash_flow" not in overview_cols or "roic" not in overview_cols or "last_scraped" not in overview_cols):
@@ -34,6 +45,7 @@ def init_db(reset: bool = False):
         beta REAL,
         current_ratio REAL,
         debt_to_equity REAL,
+        gross_margins REAL,
         operating_margins REAL,
         earnings_growth REAL,
         revenue_growth REAL,
@@ -55,6 +67,7 @@ def init_db(reset: bool = False):
     cursor.execute("PRAGMA table_info(company_overview);")
     existing_overview_cols = {row[1] for row in cursor.fetchall()}
     for col_name, col_type in [
+        ("gross_margins", "REAL"),
         ("target_mean_price", "REAL"),
         ("finviz_eps_5y", "REAL"),
         ("yahoo_lt_growth", "REAL"),
@@ -70,6 +83,8 @@ def init_db(reset: bool = False):
         year INTEGER,
         period_type TEXT,
         revenue REAL,
+        gross_profit REAL,
+        sga_expense REAL,
         net_income REAL,
         net_income_margin REAL,
         eps_diluted REAL,
@@ -95,6 +110,8 @@ def init_db(reset: bool = False):
     cursor.execute("PRAGMA table_info(financial_records);")
     existing_fin_cols = {row[1] for row in cursor.fetchall()}
     for col_name, col_type in [
+        ("gross_profit", "REAL"),
+        ("sga_expense", "REAL"),
         ("year_end_price", "REAL"),
         ("consensus_eps_growth", "REAL"),
         ("consensus_rev_growth", "REAL"),

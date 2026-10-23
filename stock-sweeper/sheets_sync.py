@@ -1,65 +1,70 @@
 import gspread
-import pandas as pd
+from config import GOOGLE_CREDS_FILE, GOOGLE_SHEET_NAME
 from screener import run_screener
 
-# Path to your Google Service Account Credentials JSON file
-CREDENTIALS_FILE = "credentials.json"
-SPREADSHEET_NAME = "Stock Sweeper Dashboard"
 
 def sync_to_google_sheets():
     """
-    Runs the SQL screener and pushes the shortlisted stocks 
+    Runs the SQL screener and pushes the shortlisted stocks
     directly to Google Sheets.
     """
     print("Running SQL Screener...")
     df = run_screener()
-    
+
     if df.empty:
         print("No stocks passed screening criteria. Skipping Google Sheets update.")
         return
 
     try:
-        # Authenticate with Google Sheets API
-        gc = gspread.service_account(filename=CREDENTIALS_FILE)
-        
-        # Open existing spreadsheet or create a new one
+        gc = gspread.service_account(filename=GOOGLE_CREDS_FILE)
+
         try:
-            sh = gc.open(SPREADSHEET_NAME)
+            sh = gc.open(GOOGLE_SHEET_NAME)
         except gspread.SpreadsheetNotFound:
-            print(f"Spreadsheet '{SPREADSHEET_NAME}' not found. Creating a new one...")
-            sh = gc.create(SPREADSHEET_NAME)
-            # Share with your own email if needed: sh.share('your_email@gmail.com', perm_type='user', role='writer')
-            
+            print(f"Spreadsheet '{GOOGLE_SHEET_NAME}' not found. Creating a new one...")
+            sh = gc.create(GOOGLE_SHEET_NAME)
+
         worksheet = sh.sheet1
         worksheet.title = "Screener Shortlist"
-        
-        # Clear existing sheet content
         worksheet.clear()
-        
-        # Prepare Data for Google Sheets
-        # Format columns cleanly (e.g. Market Cap in Billions, percentages formatted)
+
         display_df = df.copy()
-        display_df['market_cap'] = display_df['market_cap'] / 1e9  # Convert to $ Billions
-        
-        # Rename headers for human readability
-        display_df.columns = [
-            'Ticker', 'Company Name', 'Sector', 'Industry', 'Market Cap ($B)',
-            'Price ($)', 'Forward P/E', 'EPS Growth (YoY)', 'Rev Growth (YoY)',
-            'Operating Margin', 'Current Ratio', 'Debt / Equity', 'Beta'
-        ]
-        
-        # Write Headers + Rows
+        display_df["market_cap"] = (display_df["market_cap"] / 1e9).round(2)
+        display_df["free_cash_flow"] = (display_df["free_cash_flow"] / 1e6).round(2)
+
+        rename_map = {
+            "ticker": "Ticker",
+            "company_name": "Company Name",
+            "sector": "Sector",
+            "industry": "Industry",
+            "market_cap": "Market Cap ($B)",
+            "market_cap_tier": "Market Cap Tier",
+            "current_price": "Price ($)",
+            "forward_pe": "Forward P/E",
+            "earnings_growth": "EPS Growth (YoY)",
+            "revenue_growth": "Rev Growth (YoY)",
+            "operating_margins": "Operating Margin",
+            "current_ratio": "Current Ratio",
+            "debt_to_equity": "Debt / Equity",
+            "beta": "Beta",
+            "free_cash_flow": "Free Cash Flow ($M)",
+            "roic": "ROIC",
+        }
+        display_df.rename(columns=rename_map, inplace=True)
+        display_df = display_df.fillna("")
+
         data_to_write = [display_df.columns.values.tolist()] + display_df.values.tolist()
-        worksheet.update('A1', data_to_write)
-        
-        print(f"Successfully synced {len(display_df)} stocks to Google Sheet: '{SPREADSHEET_NAME}'")
+        worksheet.update("A1", data_to_write)
+
+        print(f"Successfully synced {len(display_df)} stocks to Google Sheet: '{GOOGLE_SHEET_NAME}'")
         print(f"Sheet URL: {sh.url}")
 
     except FileNotFoundError:
-        print(f"\n[Error] '{CREDENTIALS_FILE}' not found.")
-        print("Please place your Google Service Account key as 'credentials.json' in this directory.")
+        print(f"\n[Error] '{GOOGLE_CREDS_FILE}' not found.")
+        print(f"Please place your Google Service Account key as '{GOOGLE_CREDS_FILE}' in this directory.")
     except Exception as e:
         print(f"\n[Error] Google Sheets sync failed: {e}")
+
 
 if __name__ == "__main__":
     sync_to_google_sheets()

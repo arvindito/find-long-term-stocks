@@ -6,8 +6,19 @@ __pycache__/
 
 # Local Database & Output Data
 *.db
+*.db-wal
+*.db-shm
 *.csv
 *.parquet
+logs/
+
+# Images & Plots
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.svg
+*.webp
 
 # Credentials & Secrets
 google_credentials.json
