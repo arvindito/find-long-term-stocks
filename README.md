@@ -42,11 +42,26 @@ A modular Python equity research, valuation, and ranking engine designed to scan
 ## Quick Start
 
 ```bash
+# 1. Run the Stock Sweeper pipeline (in stock-sweeper/)
 cd stock-sweeper
+.venv/bin/python run_pipeline.py --skip-sweep   # Fast re-score & export
+.venv/bin/python run_pipeline.py                # Full daily sweep + enrichment + export
 
-# Run using existing swept market data (fast re-score & export)
-.venv/bin/python run_pipeline.py --skip-sweep
-
-# Run full daily market sweep + enrichment + valuation + moat & moonshot scoring
-.venv/bin/python run_pipeline.py
+# 2. Launch the Interactive Localhost Dashboard (in dashboard/)
+cd ../dashboard
+./run_dashboard.sh
+# Open http://localhost:8050 in your browser
 ```
+
+---
+
+## Interactive Localhost Dashboard (`dashboard/` — `http://localhost:8050`)
+
+A completely decoupled FastAPI + Plotly.js + Tailwind CSS financial terminal ([`dashboard/app.py`](file:///Users/arvindadvani/Git/find-long-term-stocks/dashboard/app.py), [`dashboard/static/index.html`](file:///Users/arvindadvani/Git/find-long-term-stocks/dashboard/static/index.html), [`dashboard/static/app.js`](file:///Users/arvindadvani/Git/find-long-term-stocks/dashboard/static/app.js)) that connects to `../stock-sweeper/market_data.db` in **strictly read-only mode** (`?mode=ro`) and provides 7 interactive workspaces:
+1. **Command Center & Market Universe Pulse**: Live KPIs, conviction scatter plot (`5Y CAGR` vs. `Moat Score`), market-cap tier funnel chart, and Dual-Survivor Unicorn Spotlight.
+2. **Live Custom Screener Sandbox ("What-If Filter Lab")**: Toggle any fundamental variable ON/OFF in the equation with live range sliders across all `7,300` active stocks and a real-time **Step-by-Step Gate Attrition Waterfall Chart**.
+3. **7-Pillar Qualitative Moat Studio**: Toggle any of the 7 Moat Pillars ON/OFF or customize their weights (`0–40 pts`) and post-enrichment gates (`Min Moat`, `Max 3Y Dilution`, `Min 5Y CAGR`) to re-rank compounders live.
+4. **15-Year Valuation Time-Machine & 4-Method Equation Builder (`2016–2031`)**: Toggle any of the 4 valuation methods (`M1–M4`) or `3Y Share Dilution/Buyback Drift` ON/OFF, adjust growth/margin/P/E sliders, and inspect the live 15-year fan chart for any of the `8,763` tickers.
+5. **Asymmetric 5x Moonshot Lab (`$300M–$10B`)**: Customize the 5-Pillar Inflection weights and explore the Inflection Zone scatter plot (`Revenue Growth %` vs. `Operating Margin %`).
+6. **Mega-Cap Swing-Trade & Anchor Desk (`$1T+`)**: Dedicated valuation range bars and 7-pillar comparisons for all `$1T+` mega-caps.
+7. **Head-to-Head Stock Arena & Barbell Portfolio Builder**: Compare 2–6 stocks side-by-side with overlaid radar & normalized price charts, and build a custom Barbell Portfolio (`Core Compounders` + `1% Moonshot Sleeve`).

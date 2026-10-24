@@ -14,6 +14,7 @@ All notable changes, features, bug fixes, and performance optimizations across t
 ## [Unreleased] — 2026-10-23 (Architecture Refactor, Valuation Distortion Fixes, Asymmetric Moonshot Track & Dual-Survivor Log)
 
 ### ✨ Features
+- **Decoupled Interactive Localhost Dashboard (`dashboard/app.py`, `dashboard/static/index.html`, `dashboard/static/app.js`, `dashboard/run_dashboard.sh`)**: Built a standalone 7-tab FastAPI + Plotly.js + Tailwind CSS financial terminal at `http://localhost:8050` reading `../stock-sweeper/market_data.db` in read-only mode (`?mode=ro`). Includes a live "What-If" Screener Sandbox across all 7,300 active stocks with step-by-step gate attrition waterfall charts, a customizable 7-Pillar Moat Weighter, a 15-Year 4-Method Valuation Time-Machine (`2016–2031`) with share-drift toggles, an Asymmetric 5x Moonshot Lab, a Mega-Cap Swing-Trade Desk, and a Head-to-Head Stock Comparator & Barbell Portfolio Builder.
 - **Four-Tier Portfolio Categorization & `$500M` Floor (`utils.py`, `screener.py`, `sweeper.py`)**: Lowered the main compounder screener floor from `$1B` to `$500M` (`204` shortlisted compounders) and standardized portfolio tiers across the entire codebase:
   - `Small-Cap ($500M-$5B)`
   - `Mid-Cap ($5B-$50B)`
