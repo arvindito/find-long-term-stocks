@@ -1,20 +1,41 @@
-
-# macOS metadata
+# macOS System Files
 .DS_Store
 */.DS_Store
 **/.DS_Store
 
-# Virtual environments (root and subdirectories)
+# Environments & Dependencies
 .venv/
-**/.venv/
 venv/
-**/venv/
+ENV/
 
-# Python cache & bytecode
+# Python Cache & Bytecode
 __pycache__/
-**/__pycache__/
 *.py[cod]
+*$py.class
+*.egg-info/
 
-# Logs & exports
+# Credentials, Secrets & Env Variables
+.env
+.env.*
+!.env.example
+credentials.json
+google_credentials.json
+
+# Local Databases & SQLite Wal/Shm Artifacts
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# Data Outputs & Exports
+*.parquet
+logs/
 stock-sweeper/logs/
-stock-sweeper/exports/
+
+# Media & Generated Plots
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.svg
+*.webp
